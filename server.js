@@ -1,65 +1,56 @@
 const express = require('express');
 const cors = require('cors');
-const path = require('path');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { createClient } = require('@supabase/supabase-js');
+const nodemailer = require('nodemailer');
+const cron = require('node-cron');
+const ExcelJS = require('exceljs');
+const path = require('path');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-console.log('🚀 Starting Texon Inventory Comparison Server...');
-
-// Initialize Supabase
-let supabase = null;
-try {
-    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) {
-        throw new Error('Missing Supabase credentials');
-    }
-    supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
-    console.log('✅ Supabase client initialized');
-} catch (error) {
-    console.error('❌ Supabase initialization failed:', error.message);
-    process.exit(1);
-}
-
 // Middleware
 app.use(cors());
 app.use(express.json());
 
-// Security headers
-app.use('/texon-inventory-comparison', (req, res, next) => {
-    res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet');
-    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-    next();
-});
+// Serve static files from build directory
+app.use('/texon-inventory-comparison/static', express.static(path.join(__dirname, 'build/static')));
 
-// Request logging
-app.use((req, res, next) => {
-    console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
-    next();
-});
+console.log('🚀 Starting Texon Inventory Comparison Server...');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret-change-this';
+// Environment variables validation
+const requiredEnvVars = ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'JWT_SECRET'];
+const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
+
+if (missingVars.length > 0) {
+    console.error(`❌ Missing required environment variables: ${missingVars.join(', ')}`);
+    console.error('Please check your .env file');
+    process.exit(1);
+}
+
+// Supabase client
+const supabase = createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_ANON_KEY
+);
+
+console.log('✅ Supabase client initialized');
+
+const JWT_SECRET = process.env.JWT_SECRET;
 
 // Helper functions
 async function getUserByUsername(username) {
-    try {
-        const { data, error } = await supabase
-            .from('app_users')
-            .select('*')
-            .eq('username', username)
-            .eq('is_active', true);
-
-        if (error || !data || data.length === 0) return null;
-        return data[0];
-    } catch (error) {
-        console.error('Error fetching user:', error);
-        return null;
-    }
+    const { data, error } = await supabase
+        .from('app_users')
+        .select('*')
+        .eq('username', username)
+        .single();
+    
+    if (error) return null;
+    return data;
 }
 
 // Authentication middleware
@@ -80,14 +71,39 @@ const authenticateToken = (req, res, next) => {
     });
 };
 
-// Routes
-app.get('/health', (req, res) => {
-    res.json({ 
-        status: 'OK', 
-        timestamp: new Date().toISOString(),
-        port: PORT,
-        supabase_connected: !!supabase
-    });
+// Simple Email Service (without constructor issues)
+let emailTransporter = null;
+
+async function initializeEmailService() {
+    try {
+        if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
+            console.warn('⚠️ Email configuration incomplete');
+            return;
+        }
+
+        emailTransporter = nodemailer.createTransport({
+            host: process.env.SMTP_HOST,
+            port: parseInt(process.env.SMTP_PORT) || 587,
+            secure: process.env.SMTP_SECURE === 'true',
+            auth: {
+                user: process.env.SMTP_USER,
+                pass: process.env.SMTP_PASS
+            }
+        });
+
+        await emailTransporter.verify();
+        console.log('✅ Email service configured successfully');
+    } catch (error) {
+        console.error('❌ Email service configuration failed:', error.message);
+    }
+}
+
+// Initialize email service
+initializeEmailService();
+
+// Basic API Routes
+app.get('/texon-inventory-comparison/api/health', (req, res) => {
+    res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
 
 // Authentication routes
@@ -151,9 +167,17 @@ app.get('/texon-inventory-comparison/api/auth/verify', authenticateToken, (req, 
 
 // Configuration status
 app.get('/texon-inventory-comparison/api/config-status', authenticateToken, (req, res) => {
-    const brightpearlConfigured = !!(process.env.BRIGHTPEARL_ACCOUNT && process.env.BRIGHTPEARL_APP_REF && process.env.BRIGHTPEARL_TOKEN);
+    const brightpearlConfigured = !!(
+        process.env.BRIGHTPEARL_ACCOUNT && 
+        process.env.BRIGHTPEARL_APP_REF && 
+        process.env.BRIGHTPEARL_TOKEN
+    );
     const infoplusConfigured = !!process.env.INFOPLUS_API_KEY;
-    const emailConfigured = !!(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
+    const emailConfigured = !!(
+        process.env.SMTP_HOST && 
+        process.env.SMTP_USER && 
+        process.env.SMTP_PASS
+    );
 
     res.json({
         brightpearl_configured: brightpearlConfigured,
@@ -164,180 +188,616 @@ app.get('/texon-inventory-comparison/api/config-status', authenticateToken, (req
     });
 });
 
-// Settings routes
-app.get('/texon-inventory-comparison/api/settings', authenticateToken, async (req, res) => {
-    try {
-        const { data, error } = await supabase
-            .from('app_settings')
-            .select('*');
+// Replace the mock inventory comparison in your server.js with this real version:
 
-        if (error) throw error;
+// Final Corrected BrightpearlAPI Class - Replace in your server.js
 
-        const settings = {};
-        data.forEach(setting => {
-            settings[setting.key] = setting.value;
-        });
-
-        // Add default values
-        const defaults = {
-            email_recipients: 'admin@texontowel.com',
-            smtp_host: process.env.SMTP_HOST || 'smtp.gmail.com',
-            smtp_port: process.env.SMTP_PORT || '587',
-            smtp_user: process.env.SMTP_USER || '',
-            smtp_pass: ''
-        };
-
-        res.json({ ...defaults, ...settings });
-    } catch (error) {
-        console.error('Settings fetch error:', error);
-        res.json({
-            email_recipients: 'admin@texontowel.com',
-            smtp_host: 'smtp.gmail.com',
-            smtp_port: '587'
-        });
-    }
-});
-
-app.post('/texon-inventory-comparison/api/settings', authenticateToken, async (req, res) => {
-    if (req.user.role !== 'admin') {
-        return res.status(403).json({ error: 'Admin access required' });
-    }
-    
-    try {
-        const settings = req.body;
+class BrightpearlAPI {
+    constructor() {
+        // CORRECT: Use the public API endpoint
+        this.baseUrl = 'https://use1.brightpearlconnect.com/public-api';
+        this.account = process.env.BRIGHTPEARL_ACCOUNT;
+        this.appRef = process.env.BRIGHTPEARL_APP_REF;
+        this.token = process.env.BRIGHTPEARL_TOKEN;
         
-        for (const [key, value] of Object.entries(settings)) {
-            const { error } = await supabase
-                .from('app_settings')
-                .upsert({ key, value });
+        console.log('🔧 Brightpearl API Configuration:');
+        console.log(`Base URL: ${this.baseUrl}`);
+        console.log(`Account: ${this.account}`);
+        console.log(`App Ref: ${this.appRef ? '✅ Set' : '❌ Missing'}`);
+        console.log(`Token: ${this.token ? '✅ Set' : '❌ Missing'}`);
+    }
+
+    async makeRequest(endpoint, retries = 2) {
+        for (let attempt = 1; attempt <= retries + 1; attempt++) {
+            try {
+                const url = `${this.baseUrl}/${this.account}/${endpoint}`;
+                console.log(`🔄 Brightpearl API Request (attempt ${attempt}): ${url}`);
+                
+                const response = await fetch(url, {
+                    headers: {
+                        'brightpearl-app-ref': this.appRef,
+                        'brightpearl-staff-token': this.token,  // Correct header name
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                console.log(`📊 Response: ${response.status} ${response.statusText}`);
+                console.log(`📈 Rate Limit - Requests Remaining: ${response.headers.get('brightpearl-requests-remaining') || 'N/A'}`);
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    console.error(`❌ Brightpearl API Error: ${errorText}`);
+                    
+                    // If it's a server error (5xx), retry
+                    if (response.status >= 500 && attempt <= retries) {
+                        console.log(`⏳ Server error, retrying in ${attempt * 2} seconds...`);
+                        await new Promise(resolve => setTimeout(resolve, attempt * 2000));
+                        continue;
+                    }
+                    
+                    throw new Error(`Brightpearl API error: ${response.status} ${response.statusText} - ${errorText}`);
+                }
+
+                const data = await response.json();
+                console.log(`✅ Brightpearl request successful`);
+                return data.response || data;
+                
+            } catch (error) {
+                if (attempt <= retries && (error.name === 'TypeError' || error.message.includes('fetch'))) {
+                    console.log(`⏳ Network error, retrying in ${attempt * 2} seconds...`);
+                    await new Promise(resolve => setTimeout(resolve, attempt * 2000));
+                    continue;
+                }
+                throw error;
+            }
+        }
+    }
+
+    // Final corrected getProducts method for BrightpearlAPI:
+    
+    async getProducts() {
+        try {
+            console.log('📊 Fetching Brightpearl products...');
             
-            if (error) throw error;
+            // Use product-search with filter for stock-tracked products with SKUs
+            let allProducts = [];
+            let page = 1;
+            const pageSize = 500;
+            let hasMorePages = true;
+            
+            // Column indices based on the debug output
+            const productIdIndex = 0;    // productId
+            const productNameIndex = 1;  // productName  
+            const skuIndex = 2;          // SKU
+            const stockTrackedIndex = 8; // stockTracked
+            const brandIdIndex = 14;     // brandId
+            
+            while (hasMorePages && page <= 10) { // Limit to 10 pages initially
+                console.log(`📦 Fetching Brightpearl products page ${page}...`);
+                
+                const firstResult = (page - 1) * pageSize + 1;
+                
+                // Filter for stock-tracked products only (these should have SKUs)
+                const productsData = await this.makeRequest(
+                    `product-service/product-search?pageSize=${pageSize}&firstResult=${firstResult}&filter=stockTracked eq true`
+                );
+                
+                if (productsData && productsData.results && productsData.results.length > 0) {
+                    allProducts = allProducts.concat(productsData.results);
+                    
+                    // Check if there are more pages
+                    hasMorePages = productsData.metaData?.morePagesAvailable || false;
+                    
+                    console.log(`✅ Page ${page}: ${productsData.results.length} products (Total so far: ${allProducts.length})`);
+                    page++;
+                    
+                    // Rate limiting
+                    if (hasMorePages) {
+                        await new Promise(resolve => setTimeout(resolve, 200));
+                    }
+                } else {
+                    hasMorePages = false;
+                }
+            }
+            
+            console.log(`✅ Found ${allProducts.length} stock-tracked Brightpearl products`);
+            
+            // Process products using the correct column indices
+            const products = {};
+            let skippedCount = 0;
+            
+            allProducts.forEach((productArray, index) => {
+                const productId = productArray[productIdIndex];
+                const sku = productArray[skuIndex];
+                const productName = productArray[productNameIndex];
+                const stockTracked = productArray[stockTrackedIndex];
+                
+                // Only include products with actual SKUs
+                if (productId && sku && sku.trim() !== '' && stockTracked) {
+                    products[productId] = {
+                        id: productId,
+                        sku: sku.trim(),
+                        name: productName || 'Unknown Product',
+                        brand: 'Unknown'
+                    };
+                    
+                    // Show first few for debugging
+                    if (Object.keys(products).length <= 5) {
+                        console.log(`🔍 Product ${Object.keys(products).length}: ID="${productId}", SKU="${sku}", Name="${productName}"`);
+                    }
+                } else {
+                    skippedCount++;
+                }
+            });
+            
+            console.log(`✅ Processed ${Object.keys(products).length} Brightpearl products with valid SKUs`);
+            console.log(`⚠️ Skipped ${skippedCount} products without SKUs`);
+            
+            // Show sample of final products
+            const sampleSkus = Object.values(products).slice(0, 5).map(p => p.sku);
+            console.log('📊 Sample Brightpearl SKUs:', sampleSkus);
+            
+            return products;
+            
+        } catch (error) {
+            console.error('❌ Error fetching Brightpearl products:', error);
+            throw error;
         }
-
-        res.json({ success: true });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
     }
-});
 
-// User management routes
-app.get('/texon-inventory-comparison/api/users', authenticateToken, async (req, res) => {
-    if (req.user.role !== 'admin') {
-        return res.status(403).json({ error: 'Admin access required' });
+    async getInventoryLevels(productIds) {
+        try {
+            console.log('📦 Fetching Brightpearl inventory levels...');
+            
+            const inventory = {};
+            const batchSize = 50; // Smaller batch size for inventory
+            const productIdArray = Array.isArray(productIds) ? productIds : Object.keys(productIds);
+            
+            for (let i = 0; i < productIdArray.length; i += batchSize) {
+                const batch = productIdArray.slice(i, i + batchSize);
+                const idRange = batch.join(',');
+                
+                console.log(`📦 Fetching inventory batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(productIdArray.length/batchSize)} (${batch.length} products)`);
+                
+                try {
+                    const inventoryData = await this.makeRequest(`warehouse-service/product-availability/${idRange}`);
+                    
+                    if (inventoryData && inventoryData.results) {
+                        Object.entries(inventoryData.results).forEach(([productId, productInventory]) => {
+                            let totalAvailable = 0;
+                            
+                            // Sum across all warehouses
+                            if (typeof productInventory === 'object') {
+                                Object.values(productInventory).forEach(warehouseStock => {
+                                    if (typeof warehouseStock === 'object' && warehouseStock.availableStock !== undefined) {
+                                        totalAvailable += warehouseStock.availableStock || 0;
+                                    }
+                                });
+                            }
+                            
+                            inventory[productId] = {
+                                available: totalAvailable
+                            };
+                        });
+                    }
+                } catch (batchError) {
+                    console.warn(`⚠️ Failed to fetch inventory for batch ${Math.floor(i/batchSize) + 1}: ${batchError.message}`);
+                    // Continue with next batch
+                }
+                
+                // Rate limiting delay
+                if (i + batchSize < productIdArray.length) {
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                }
+            }
+            
+            console.log(`✅ Processed inventory for ${Object.keys(inventory).length} products`);
+            return inventory;
+            
+        } catch (error) {
+            console.error('❌ Error fetching Brightpearl inventory:', error);
+            throw error;
+        }
     }
-    
-    try {
-        const { data, error } = await supabase
-            .from('app_users')
-            .select('id, username, email, role, created_at, last_login, is_active')
-            .order('created_at', { ascending: false });
 
-        if (error) throw error;
-        res.json(data);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
+    async getInventory() {
+        try {
+            console.log('🚀 Starting Brightpearl inventory fetch...');
+            
+            const products = await this.getProducts();
+            const productCount = Object.keys(products).length;
+            
+            if (productCount === 0) {
+                console.warn('⚠️ No products found in Brightpearl');
+                return {};
+            }
+            
+            console.log(`📊 Found ${productCount} Brightpearl products, fetching inventory...`);
+            
+            const inventoryLevels = await this.getInventoryLevels(Object.keys(products));
+            
+            const inventory = {};
+            Object.entries(products).forEach(([productId, product]) => {
+                const stock = inventoryLevels[productId] || { available: 0 };
+                inventory[product.sku] = {
+                    sku: product.sku,
+                    productName: product.name,
+                    brand: product.brand,
+                    quantity: stock.available
+                };
+            });
+            
+            console.log(`✅ Successfully processed ${Object.keys(inventory).length} Brightpearl inventory items`);
+            return inventory;
+            
+        } catch (error) {
+            console.error('❌ Error in Brightpearl getInventory:', error);
+            throw error;
+        }
     }
-});
 
-app.post('/texon-inventory-comparison/api/users', authenticateToken, async (req, res) => {
-    if (req.user.role !== 'admin') {
-        return res.status(403).json({ error: 'Admin access required' });
+    async testConnection() {
+        try {
+            console.log('🧪 Testing Brightpearl connection...');
+            
+            // Test with the product search endpoint we know works
+            const testData = await this.makeRequest('product-service/product-search?pageSize=1');
+            
+            if (testData && (testData.results || testData.metaData)) {
+                const totalProducts = testData.metaData?.resultsAvailable || 0;
+                return { 
+                    success: true, 
+                    message: `Brightpearl connection successful! Found ${totalProducts} products available.` 
+                };
+            } else {
+                return { 
+                    success: false, 
+                    message: 'Connected but received unexpected response format' 
+                };
+            }
+            
+        } catch (error) {
+            console.error('❌ Brightpearl connection test failed:', error.message);
+            return { 
+                success: false, 
+                message: `Connection failed: ${error.message}` 
+            };
+        }
     }
-    
-    try {
-        const { username, password, email, role } = req.body;
+}
+
+// Corrected InfoplusAPI Class - Replace in your server.js
+
+class InfoplusAPI {
+    constructor() {
+        // CORRECT: Use the proper Infoplus domain format
+        this.companyId = process.env.INFOPLUS_COMPANY_ID || 'texon'; // Your company identifier
+        this.baseUrl = `https://${this.companyId}.infopluswms.com/infoplus-wms/api`;
+        this.apiKey = process.env.INFOPLUS_API_KEY;
+        this.lobId = process.env.INFOPLUS_LOB_ID || 1;
+        this.version = 'beta'; // Use beta version for full access
         
-        const existingUser = await getUserByUsername(username);
-        if (existingUser) {
-            return res.status(400).json({ error: 'User already exists' });
+        console.log('🔧 Infoplus API Configuration:');
+        console.log(`Base URL: ${this.baseUrl}`);
+        console.log(`Company ID: ${this.companyId}`);
+        console.log(`LOB ID: ${this.lobId}`);
+        console.log(`API Key: ${this.apiKey ? '✅ Set' : '❌ Missing'}`);
+        console.log(`Version: ${this.version}`);
+    }
+
+    async makeRequest(endpoint, options = {}) {
+        try {
+            const url = `${this.baseUrl}/${this.version}/${endpoint}`;
+            console.log(`🔄 Infoplus API Request: ${url}`);
+            
+            const response = await fetch(url, {
+                headers: {
+                    'API-Key': this.apiKey,
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                },
+                ...options
+            });
+
+            console.log(`📊 Infoplus Response: ${response.status} ${response.statusText}`);
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error(`❌ Infoplus API Error: ${errorText}`);
+                throw new Error(`Infoplus API error: ${response.status} ${response.statusText} - ${errorText}`);
+            }
+
+            const data = await response.json();
+            console.log(`✅ Infoplus request successful`);
+            return data;
+            
+        } catch (error) {
+            console.error('❌ Infoplus API Error:', error);
+            throw error;
+        }
+    }
+
+    // Replace the getInventory method in your InfoplusAPI class with this optimized version:
+    
+    async getInventory() {
+        try {
+            console.log('📊 Fetching Infoplus inventory...');
+            
+            // Instead of fetching ALL inventory details, let's try the item endpoint first
+            // which should give us current quantities more efficiently
+            let allItems = [];
+            let page = 1;
+            const limit = 250;
+            let hasMore = true;
+            
+            while (hasMore && page <= 20) { // Limit to 20 pages (5000 items) to start
+                console.log(`📦 Fetching Infoplus items page ${page}...`);
+                
+                const offset = (page - 1) * limit;
+                const searchParams = new URLSearchParams({
+                    limit: limit,
+                    offset: offset,
+                    filter: `lobId eq ${this.lobId}` // Filter by Line of Business
+                });
+                
+                const itemData = await this.makeRequest(
+                    `item/search?${searchParams.toString()}`
+                );
+                
+                if (itemData && itemData.length > 0) {
+                    allItems = allItems.concat(itemData);
+                    
+                    hasMore = itemData.length === limit;
+                    console.log(`✅ Page ${page}: ${itemData.length} items (Total so far: ${allItems.length})`);
+                    page++;
+                    
+                    // Rate limiting
+                    if (hasMore) {
+                        await new Promise(resolve => setTimeout(resolve, 200));
+                    }
+                } else {
+                    hasMore = false;
+                }
+            }
+            
+            console.log(`✅ Found ${allItems.length} Infoplus items`);
+            
+            // Convert items to inventory format
+            const inventory = {};
+            allItems.forEach(item => {
+                const sku = item.sku;
+                
+                if (sku) {
+                    inventory[sku] = {
+                        sku: sku,
+                        productName: item.itemDescription || item.itemShortDescription || 'Unknown Product',
+                        quantity: item.availableQuantity || item.quantityOnHand || 0
+                    };
+                }
+            });
+            
+            console.log(`✅ Processed ${Object.keys(inventory).length} unique Infoplus SKUs`);
+            return inventory;
+            
+        } catch (error) {
+            console.error('❌ Error fetching Infoplus inventory:', error);
+            throw error;
+        }
+    }
+
+    async testConnection() {
+        try {
+            console.log('🧪 Testing Infoplus connection...');
+            
+            // Test with a simple warehouse lookup
+            const testData = await this.makeRequest(`warehouse/search?limit=1`);
+            
+            if (testData && Array.isArray(testData)) {
+                return { 
+                    success: true, 
+                    message: `Infoplus connection successful! Found ${testData.length > 0 ? 'warehouses' : 'empty warehouse list'}.` 
+                };
+            } else {
+                return { 
+                    success: false, 
+                    message: 'Connected but received unexpected response format' 
+                };
+            }
+            
+        } catch (error) {
+            console.error('❌ Infoplus connection test failed:', error.message);
+            
+            if (error.message.includes('401') || error.message.includes('403')) {
+                return { 
+                    success: false, 
+                    message: 'Authentication failed - check API key and permissions' 
+                };
+            }
+            
+            return { 
+                success: false, 
+                message: `Connection failed: ${error.message}` 
+            };
+        }
+    }
+}
+
+// Initialize API clients
+const brightpearlAPI = new BrightpearlAPI();
+const infoplusAPI = new InfoplusAPI();
+
+// Real inventory comparison function
+async function performRealInventoryComparison() {
+    try {
+        console.log('🔄 Starting REAL inventory comparison...');
+        
+        // Fetch inventory from both systems in parallel
+        console.log('📊 Fetching inventory from both systems...');
+        const [brightpearlInventory, infoplusInventory] = await Promise.all([
+            brightpearlAPI.getInventory(),
+            infoplusAPI.getInventory()
+        ]);
+
+        console.log(`📊 Brightpearl items: ${Object.keys(brightpearlInventory).length}`);
+        console.log(`📊 Infoplus items: ${Object.keys(infoplusInventory).length}`);
+        
+        // Add this debugging code to your performRealInventoryComparison function
+        // Insert this right after fetching both inventories:
+        
+        console.log('🔍 SKU Analysis Debug:');
+        
+        // Sample Brightpearl SKUs
+        const brightpearlSkus = Object.keys(brightpearlInventory).slice(0, 10);
+        console.log('📊 Sample Brightpearl SKUs:', brightpearlSkus);
+        
+        // Sample Infoplus SKUs  
+        const infoplusSkus = Object.keys(infoplusInventory).slice(0, 10);
+        console.log('📦 Sample Infoplus SKUs:', infoplusSkus);
+        
+        // Check for exact matches
+        const exactMatches = brightpearlSkus.filter(sku => infoplusInventory[sku]);
+        console.log('✅ Exact SKU matches found:', exactMatches.length);
+        
+        // Check for case-insensitive matches
+        const brightpearlSkusLower = Object.keys(brightpearlInventory).map(sku => sku.toLowerCase());
+        const infoplusSkusLower = Object.keys(infoplusInventory).map(sku => sku.toLowerCase());
+        const caseInsensitiveMatches = brightpearlSkusLower.filter(sku => infoplusSkusLower.includes(sku));
+        console.log('🔤 Case-insensitive matches:', caseInsensitiveMatches.length);
+        
+        // Check for partial matches (substring matching)
+        let partialMatches = 0;
+        brightpearlSkus.forEach(bpSku => {
+            infoplusSkus.forEach(ipSku => {
+                if (bpSku.includes(ipSku) || ipSku.includes(bpSku)) {
+                    partialMatches++;
+                    console.log(`🔗 Partial match: "${bpSku}" ↔ "${ipSku}"`);
+                }
+            });
+        });
+        console.log(`🔗 Partial matches found: ${partialMatches}`);
+        
+        // Show sample inventory data structures
+        if (brightpearlSkus.length > 0) {
+            const sampleBpItem = brightpearlInventory[brightpearlSkus[0]];
+            console.log('📊 Sample Brightpearl item:', JSON.stringify(sampleBpItem, null, 2));
         }
         
-        const hashedPassword = await bcrypt.hash(password, 10);
+        if (infoplusSkus.length > 0) {
+            const sampleIpItem = infoplusInventory[infoplusSkus[0]];
+            console.log('📦 Sample Infoplus item:', JSON.stringify(sampleIpItem, null, 2));
+        }
         
-        const { data, error } = await supabase
-            .from('app_users')
-            .insert([{
-                username,
-                password_hash: hashedPassword,
-                email,
-                role: role || 'user',
-                is_active: true,
-                created_at: new Date().toISOString()
-            }])
-            .select()
-            .single();
-
-        if (error) throw error;
+        // Add this enhanced debugging after the SKU analysis in performRealInventoryComparison:
         
-        res.json({ 
-            success: true, 
-            user: {
-                id: data.id,
-                username: data.username,
-                email: data.email,
-                role: data.role
+        console.log('🔍 Enhanced SKU Analysis:');
+        
+        // Check Brightpearl SKU patterns  
+        const allBrightpearlSkus = Object.keys(brightpearlInventory);
+        const bpNumericSkus = allBrightpearlSkus.filter(sku => /^\d+$/.test(sku));
+        const bpAlphanumericSkus = allBrightpearlSkus.filter(sku => /^[A-Za-z0-9-]+$/.test(sku) && !/^\d+$/.test(sku));
+        
+        console.log(`📊 Brightpearl SKU patterns:`);
+        console.log(`  - Numeric only: ${bpNumericSkus.length} (e.g., ${bpNumericSkus.slice(0, 3).join(', ')})`);
+        console.log(`  - Alphanumeric: ${bpAlphanumericSkus.length} (e.g., ${bpAlphanumericSkus.slice(0, 3).join(', ')})`);
+        
+        // Check Infoplus SKU patterns
+        const allInfoplusSkus = Object.keys(infoplusInventory);
+        const ipNumericSkus = allInfoplusSkus.filter(sku => /^\d+$/.test(sku));
+        const ipAlphanumericSkus = allInfoplusSkus.filter(sku => /^[A-Za-z0-9-]+$/.test(sku));
+        
+        console.log(`📦 Infoplus SKU patterns:`);
+        console.log(`  - Numeric only: ${ipNumericSkus.length} (e.g., ${ipNumericSkus.slice(0, 3).join(', ')})`);
+        console.log(`  - Alphanumeric: ${ipAlphanumericSkus.length} (e.g., ${ipAlphanumericSkus.slice(0, 3).join(', ')})`);
+        
+        // Find actual matches
+        const realExactMatches = [];
+        const realCaseMatches = [];
+        
+        allBrightpearlSkus.forEach(bpSku => {
+            if (infoplusInventory[bpSku]) {
+                realExactMatches.push(bpSku);
+            } else if (infoplusInventory[bpSku.toLowerCase()] || infoplusInventory[bpSku.toUpperCase()]) {
+                realCaseMatches.push(bpSku);
             }
         });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-app.put('/texon-inventory-comparison/api/users/:id', authenticateToken, async (req, res) => {
-    if (req.user.role !== 'admin') {
-        return res.status(403).json({ error: 'Admin access required' });
-    }
-    
-    try {
-        const updates = req.body;
         
-        if (updates.password) {
-            updates.password_hash = await bcrypt.hash(updates.password, 10);
-            delete updates.password;
+        console.log(`🎯 Actual SKU matches:`);
+        console.log(`  - Exact matches: ${realExactMatches.length} (e.g., ${realExactMatches.slice(0, 5).join(', ')})`);
+        console.log(`  - Case insensitive: ${realCaseMatches.length} (e.g., ${realCaseMatches.slice(0, 5).join(', ')})`);
+        
+        // Show some sample matched pairs
+        if (realExactMatches.length > 0) {
+            console.log(`🔗 Sample exact matches:`);
+            realExactMatches.slice(0, 3).forEach(sku => {
+                const bpQty = brightpearlInventory[sku]?.quantity || 0;
+                const ipQty = infoplusInventory[sku]?.quantity || 0;
+                console.log(`  "${sku}": BP=${bpQty}, IP=${ipQty}, Diff=${bpQty - ipQty}`);
+            });
+        }
+        
+        // Check if Brightpearl SKUs look suspiciously like product IDs
+        const avgBpSkuLength = allBrightpearlSkus.reduce((sum, sku) => sum + sku.length, 0) / allBrightpearlSkus.length;
+        const allBpNumeric = allBrightpearlSkus.every(sku => /^\d+$/.test(sku));
+        
+        console.log(`⚠️ Brightpearl SKU Analysis:`);
+        console.log(`  - Average length: ${avgBpSkuLength.toFixed(1)} characters`);
+        console.log(`  - All numeric: ${allBpNumeric}`);
+        
+        if (allBpNumeric && avgBpSkuLength < 6) {
+            console.log(`🚨 WARNING: Brightpearl SKUs look like product IDs, not actual SKUs!`);
+            console.log(`   - Expected SKUs: alphanumeric codes like "TOWEL-001", "RACK-HD-48"`);
+            console.log(`   - Current SKUs: simple numbers like "656", "692", "12003"`);
+            console.log(`   - This suggests we might be using the wrong field from Brightpearl`);
         }
 
-        const { data, error } = await supabase
-            .from('app_users')
-            .update(updates)
-            .eq('id', req.params.id)
-            .select();
+        // Compare inventories
+        const discrepancies = [];
+        const allSkus = new Set([
+            ...Object.keys(brightpearlInventory),
+            ...Object.keys(infoplusInventory)
+        ]);
 
-        if (error) throw error;
-        res.json({ success: true, user: data[0] });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
+        console.log(`🔍 Analyzing ${allSkus.size} unique SKUs...`);
 
-// Mock inventory comparison (replace with real implementation)
-app.post('/texon-inventory-comparison/api/run-comparison', authenticateToken, async (req, res) => {
-    try {
-        console.log('🔄 Running inventory comparison...');
-        
-        // Mock data for demonstration
-        const mockDiscrepancies = [
-            {
-                sku: 'TOWEL-001',
-                brightpearl_stock: 150,
-                infoplus_stock: 148,
-                difference: 2,
-                percentage_diff: 1.3
-            },
-            {
-                sku: 'TOWEL-002', 
-                brightpearl_stock: 75,
-                infoplus_stock: 80,
-                difference: -5,
-                percentage_diff: 6.7
+        allSkus.forEach(sku => {
+            const brightpearlItem = brightpearlInventory[sku];
+            const infoplusItem = infoplusInventory[sku];
+
+            const brightpearlStock = brightpearlItem?.quantity || 0;
+            const infoplusStock = infoplusItem?.quantity || 0;
+            const difference = brightpearlStock - infoplusStock;
+
+            // Only report discrepancies (not exact matches)
+            if (difference !== 0) {
+                const percentageDiff = infoplusStock > 0 
+                    ? Math.round((Math.abs(difference) / infoplusStock) * 100 * 10) / 10 
+                    : 100;
+
+                discrepancies.push({
+                    sku,
+                    productName: brightpearlItem?.productName || infoplusItem?.productName || 'Unknown Product',
+                    brightpearl_stock: brightpearlStock,
+                    infoplus_stock: infoplusStock,
+                    difference,
+                    percentage_diff: percentageDiff,
+                    brand: brightpearlItem?.brand || 'Unknown'
+                });
             }
-        ];
-        
+        });
+
+        // Sort by absolute difference (largest discrepancies first)
+        discrepancies.sort((a, b) => Math.abs(b.difference) - Math.abs(a.difference));
+
+        console.log(`✅ Found ${discrepancies.length} discrepancies out of ${allSkus.size} SKUs`);
+
         // Save report to database
         const reportData = {
             date: new Date().toISOString().split('T')[0],
-            total_discrepancies: mockDiscrepancies.length,
-            discrepancies: JSON.stringify(mockDiscrepancies),
-            created_at: new Date().toISOString()
+            total_discrepancies: discrepancies.length,
+            discrepancies: JSON.stringify(discrepancies),
+            created_at: new Date().toISOString(),
+            brightpearl_total_items: Object.keys(brightpearlInventory).length,
+            infoplus_total_items: Object.keys(infoplusInventory).length
         };
 
         const { data, error } = await supabase
@@ -347,19 +807,139 @@ app.post('/texon-inventory-comparison/api/run-comparison', authenticateToken, as
             .single();
 
         if (error) throw error;
-        
-        res.json({
-            totalDiscrepancies: mockDiscrepancies.length,
-            discrepancies: mockDiscrepancies,
-            message: 'Comparison completed (demo data)',
-            reportId: data.id
-        });
-        
+
+        // Send email if configured and there are discrepancies
+        const emailRecipients = process.env.EMAIL_RECIPIENTS;
+        if (emailRecipients && emailTransporter && discrepancies.length > 0) {
+            try {
+                await sendInventoryReportEmail({
+                    ...reportData,
+                    discrepancies
+                }, emailRecipients);
+                console.log('✅ Email report sent successfully');
+            } catch (emailError) {
+                console.error('❌ Failed to send email report:', emailError);
+            }
+        }
+
+        return {
+            totalDiscrepancies: discrepancies.length,
+            discrepancies: discrepancies.slice(0, 50), // Limit response size
+            message: `Real inventory comparison completed - analyzed ${allSkus.size} SKUs`,
+            reportId: data.id,
+            brightpearlItems: Object.keys(brightpearlInventory).length,
+            infoplusItems: Object.keys(infoplusInventory).length,
+            totalSkusAnalyzed: allSkus.size
+        };
+
     } catch (error) {
-        console.error('Comparison error:', error);
+        console.error('❌ Real inventory comparison failed:', error);
+        throw error;
+    }
+}
+
+// Email function (simplified version)
+async function sendInventoryReportEmail(reportData, recipients) {
+    if (!emailTransporter) {
+        throw new Error('Email service not configured');
+    }
+
+    try {
+        const { discrepancies, totalDiscrepancies, date } = reportData;
+        
+        const subject = `Texon Inventory Comparison Report - ${date} (${totalDiscrepancies} discrepancies)`;
+        
+        let htmlContent = `
+            <h2>Texon Inventory Comparison Report</h2>
+            <p><strong>Date:</strong> ${date}</p>
+            <p><strong>Total Discrepancies:</strong> ${totalDiscrepancies}</p>
+            
+            ${totalDiscrepancies > 0 ? `
+            <h3>Top Discrepancies:</h3>
+            <table border="1" cellpadding="8" cellspacing="0" style="border-collapse: collapse;">
+                <thead>
+                    <tr style="background-color: #f0f0f0;">
+                        <th>SKU</th>
+                        <th>Product Name</th>
+                        <th>Brightpearl Stock</th>
+                        <th>Infoplus Stock</th>
+                        <th>Difference</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${discrepancies.slice(0, 20).map(item => `
+                        <tr>
+                            <td><strong>${item.sku}</strong></td>
+                            <td>${item.productName || 'N/A'}</td>
+                            <td style="text-align: right;">${item.brightpearl_stock}</td>
+                            <td style="text-align: right;">${item.infoplus_stock}</td>
+                            <td style="text-align: right; color: ${item.difference < 0 ? 'red' : 'green'};">
+                                ${item.difference > 0 ? '+' : ''}${item.difference}
+                            </td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+            ` : '<p style="color: green;"><strong>✅ No discrepancies found!</strong></p>'}
+            
+            <p><em>Automated report from Texon Inventory Comparison system.</em></p>
+        `;
+
+        const mailOptions = {
+            from: process.env.SMTP_FROM || process.env.SMTP_USER,
+            to: recipients,
+            subject: subject,
+            html: htmlContent
+        };
+
+        const result = await emailTransporter.sendMail(mailOptions);
+        return result;
+    } catch (error) {
+        console.error('❌ Failed to send email:', error);
+        throw error;
+    }
+}
+
+// REPLACE the mock run-comparison route with this real one:
+app.post('/texon-inventory-comparison/api/run-comparison', authenticateToken, async (req, res) => {
+    try {
+        const result = await performRealInventoryComparison();
+        res.json(result);
+    } catch (error) {
+        console.error('❌ Real comparison failed:', error);
         res.status(500).json({ error: error.message });
     }
 });
+
+// UPDATE the test endpoint to test real APIs:
+app.get('/texon-inventory-comparison/api/test', authenticateToken, async (req, res) => {
+    try {
+        const brightpearlTest = await brightpearlAPI.testConnection();
+        const infoplusTest = await infoplusAPI.testConnection();
+        
+        res.json({
+            message: 'API test completed',
+            brightpearl: brightpearlTest,
+            infoplus: infoplusTest,
+            user: req.user,
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Enable the scheduled comparison (uncomment this when ready):
+// cron.schedule('0 19 * * *', async () => {
+//     console.log('⏰ Running scheduled inventory comparison...');
+//     try {
+//         await performRealInventoryComparison();
+//     } catch (error) {
+//         console.error('❌ Scheduled comparison failed:', error);
+//     }
+// }, {
+//     timezone: "America/New_York"
+// });
 
 // Reports routes
 app.get('/texon-inventory-comparison/api/reports', authenticateToken, async (req, res) => {
@@ -379,477 +959,116 @@ app.get('/texon-inventory-comparison/api/reports', authenticateToken, async (req
 
         res.json(reports);
     } catch (error) {
-        console.error('Reports fetch error:', error);
+        console.error('❌ Reports fetch error:', error);
         res.json([]);
     }
 });
 
-// Password reset endpoint
-app.post('/texon-inventory-comparison/api/reset-password', async (req, res) => {
+// Get latest report
+app.get('/texon-inventory-comparison/api/latest-report', authenticateToken, async (req, res) => {
     try {
-        const { username, newPassword } = req.body;
-        
-        if (!username || !newPassword) {
-            return res.status(400).json({ error: 'Username and new password required' });
-        }
-        
-        const hashedPassword = await bcrypt.hash(newPassword, 10);
-        
         const { data, error } = await supabase
-            .from('app_users')
-            .update({ password_hash: hashedPassword })
-            .eq('username', username)
-            .select();
-        
+            .from('inventory_reports')
+            .select('*')
+            .order('created_at', { ascending: false })
+            .limit(1);
+
         if (error) throw error;
-        
-        if (!data || data.length === 0) {
-            return res.status(404).json({ error: 'User not found' });
+
+        if (data && data.length > 0) {
+            const report = {
+                ...data[0],
+                discrepancies: JSON.parse(data[0].discrepancies || '[]')
+            };
+            res.json(report);
+        } else {
+            res.json(null);
         }
-        
-        res.json({ 
-            success: true, 
-            message: 'Password reset successfully'
-        });
-        
     } catch (error) {
+        console.error('❌ Latest report fetch error:', error);
         res.status(500).json({ error: error.message });
     }
 });
 
-// Main application route
-app.get('/texon-inventory-comparison', (req, res) => {
-    res.send(`
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="robots" content="noindex, nofollow, noarchive, nosnippet" />
-    <title>Texon Inventory Comparison</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f5; }
-        
-        .login-container { display: flex; justify-content: center; align-items: center; min-height: 100vh; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; }
-        .login-form { background: white; padding: 40px; border-radius: 10px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); width: 100%; max-width: 400px; text-align: center; }
-        .login-form h1 { margin: 0 0 10px 0; color: #333; font-size: 1.8rem; }
-        .login-form p { color: #666; margin-bottom: 30px; }
-        .error-message, .success-message { padding: 15px; border-radius: 5px; margin-bottom: 20px; display: none; }
-        .error-message { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
-        .success-message { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
-        .form-group { margin-bottom: 20px; text-align: left; }
-        .form-group label { display: block; margin-bottom: 5px; font-weight: 500; color: #333; }
-        .form-group input, .form-group select, .form-group textarea { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 1rem; box-sizing: border-box; }
-        .btn-primary { background: #007bff; color: #fff; border: none; padding: 12px 24px; border-radius: 5px; cursor: pointer; font-size: 1rem; font-weight: 500; width: 100%; margin-bottom: 10px; }
-        .btn-secondary { background: #6c757d; color: #fff; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; font-size: 0.9rem; width: 100%; margin-bottom: 10px; }
-        .btn-primary:hover:not(:disabled) { background: #0056b3; }
-        .btn-primary:disabled { background: #ccc; cursor: not-allowed; }
-        
-        .app { max-width: 1200px; margin: 0 auto; background: white; min-height: 100vh; display: none; }
-        .app-header { background: #fff; border-bottom: 2px solid #e0e0e0; padding: 20px; }
-        .header-content { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-        .header-content h1 { margin: 0; color: #333; font-size: 2rem; }
-        .user-info { display: flex; align-items: center; gap: 15px; color: #666; }
-        .btn-logout { background: #dc3545; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; }
-        nav { display: flex; gap: 10px; flex-wrap: wrap; }
-        nav button { padding: 10px 20px; border: 2px solid #007bff; background: #fff; color: #007bff; border-radius: 5px; cursor: pointer; font-weight: 500; transition: all 0.2s; }
-        nav button:hover { background: #f8f9fa; }
-        nav button.active { background: #007bff; color: #fff; }
-        
-        .main-content { padding: 30px; }
-        .tab-content { display: none; }
-        .tab-content.active { display: block; }
-        
-        .dashboard-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin-bottom: 30px; }
-        .stat-card { background: #f8f9fa; padding: 20px; border-radius: 8px; border: 1px solid #e0e0e0; }
-        .stat-card h3 { margin: 0 0 10px 0; color: #666; font-size: 1rem; }
-        .stat-card p { margin: 0; font-size: 1.5rem; font-weight: bold; color: #333; }
-        .stat-card small { color: #888; font-size: 0.875rem; }
-        
-        .manual-run { background: #fff; padding: 30px; border-radius: 8px; border: 1px solid #e0e0e0; text-align: center; margin-bottom: 30px; }
-        .manual-run h3 { margin: 0 0 10px 0; color: #333; }
-        .manual-run p { color: #666; margin-bottom: 20px; }
-        
-        .config-status { background: #fff3cd; border: 1px solid #ffeaa7; color: #856404; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
-        .result-display { margin-top: 20px; padding: 15px; background: #f8f9fa; border-radius: 5px; text-align: left; }
-        
-        .reports-list { display: grid; gap: 20px; }
-        .report-card { background: #fff; padding: 20px; border-radius: 8px; border: 1px solid #e0e0e0; display: flex; justify-content: space-between; align-items: center; }
-        .report-header { display: flex; align-items: center; gap: 15px; }
-        .report-header h3 { margin: 0; color: #333; }
-        .status { padding: 4px 12px; border-radius: 20px; font-size: 0.875rem; font-weight: 500; }
-        .status.success { background: #d4edda; color: #155724; }
-        .status.warning { background: #fff3cd; color: #856404; }
-        
-        @media (max-width: 768px) {
-            .login-form { margin: 20px; padding: 30px 20px; }
-            .header-content { flex-direction: column; gap: 15px; align-items: flex-start; }
-            .dashboard-stats { grid-template-columns: 1fr; }
-            .report-card { flex-direction: column; align-items: flex-start; gap: 15px; }
-            .main-content { padding: 20px; }
-        }
-    </style>
-</head>
-<body>
-    <!-- Login Form -->
-    <div id="login-container" class="login-container">
-        <div class="login-form">
-            <h1>Texon Inventory Comparison</h1>
-            <p>Secure inventory management system</p>
-            
-            <div id="error-message" class="error-message"></div>
-            <div id="success-message" class="success-message"></div>
-            
-            <form id="login-form">
-                <div class="form-group">
-                    <label>Username:</label>
-                    <input type="text" id="username" required autocomplete="username" value="admin" />
-                </div>
-                
-                <div class="form-group">
-                    <label>Password:</label>
-                    <input type="password" id="password" required autocomplete="current-password" value="changeme123" />
-                </div>
-                
-                <button type="submit" id="login-btn" class="btn-primary">Login</button>
-            </form>
-        </div>
-    </div>
+// Settings routes
+app.get('/texon-inventory-comparison/api/settings', authenticateToken, async (req, res) => {
+    try {
+        const { data, error } = await supabase
+            .from('app_settings')
+            .select('*');
 
-    <!-- Main Application -->
-    <div id="app" class="app">
-        <header class="app-header">
-            <div class="header-content">
-                <h1>Texon Inventory Comparison</h1>
-                <div class="user-info">
-                    <span id="welcome-user">Welcome, User</span>
-                    <button id="logout-btn" class="btn-logout">Logout</button>
-                </div>
-            </div>
-            <nav>
-                <button id="nav-dashboard" class="active">Dashboard</button>
-                <button id="nav-settings">Settings</button>
-                <button id="nav-reports">Reports</button>
-                <button id="nav-users">Users</button>
-            </nav>
-        </header>
+        if (error) throw error;
 
-        <main class="main-content">
-            <!-- Dashboard Tab -->
-            <div id="tab-dashboard" class="tab-content active">
-                <h2>Dashboard</h2>
-                
-                <div id="config-status" class="config-status">
-                    <h3>⚙️ Configuration Status</h3>
-                    <p id="config-details">Loading configuration status...</p>
-                    <button id="refresh-config" class="btn-secondary" style="width: auto; margin-top: 10px;">Refresh Status</button>
-                </div>
-                
-                <div class="dashboard-stats">
-                    <div class="stat-card">
-                        <h3>System Status</h3>
-                        <p>✅ Online</p>
-                        <small>Connected to Supabase</small>
-                    </div>
-                    <div class="stat-card">
-                        <h3>Latest Report</h3>
-                        <p id="latest-report">No reports yet</p>
-                        <small id="latest-report-date">Run your first comparison</small>
-                    </div>
-                    <div class="stat-card">
-                        <h3>Scheduled Run</h3>
-                        <p>Daily at 7:00 PM</p>
-                        <small>Automated daily comparisons</small>
-                    </div>
-                </div>
-                
-                <div class="manual-run">
-                    <h3>Manual Inventory Comparison</h3>
-                    <p>Run an inventory comparison between Brightpearl and Infoplus systems.</p>
-                    <button id="run-comparison" class="btn-primary">Run Comparison Now</button>
-                    <div id="comparison-result" class="result-display" style="display: none;"></div>
-                </div>
-            </div>
-
-            <!-- Settings Tab -->
-            <div id="tab-settings" class="tab-content">
-                <h2>Settings</h2>
-                <div class="config-status">
-                    <h3>📧 Email Configuration</h3>
-                    <p>Configure email settings for automated reports. Only admin users can modify settings.</p>
-                </div>
-                <p>Settings panel will be available once all APIs are configured.</p>
-            </div>
-
-            <!-- Reports Tab -->
-            <div id="tab-reports" class="tab-content">
-                <h2>Reports History (Last 30 Days)</h2>
-                <div id="reports-list" class="reports-list">
-                    <p>Loading reports...</p>
-                </div>
-            </div>
-
-            <!-- Users Tab -->
-            <div id="tab-users" class="tab-content">
-                <h2>User Management</h2>
-                <p>User management panel available for admin users.</p>
-            </div>
-        </main>
-    </div>
-
-    <script>
-        const API_BASE = '/texon-inventory-comparison/api';
-        let currentUser = null;
-        let currentToken = null;
-
-        document.addEventListener('DOMContentLoaded', function() {
-            const token = localStorage.getItem('texon_token');
-            const user = localStorage.getItem('texon_user');
-            
-            if (token && user) {
-                currentToken = token;
-                currentUser = JSON.parse(user);
-                showApp();
-            }
-
-            document.getElementById('login-form').addEventListener('submit', handleLogin);
-            document.getElementById('logout-btn').addEventListener('click', handleLogout);
-            document.getElementById('run-comparison').addEventListener('click', runComparison);
-            document.getElementById('refresh-config').addEventListener('click', loadConfigStatus);
-            
-            ['dashboard', 'settings', 'reports', 'users'].forEach(tab => {
-                document.getElementById('nav-' + tab).addEventListener('click', () => showTab(tab));
-            });
+        const settings = {};
+        data.forEach(setting => {
+            settings[setting.key] = setting.value;
         });
 
-        async function handleLogin(e) {
-            e.preventDefault();
-            
-            const username = document.getElementById('username').value;
-            const password = document.getElementById('password').value;
-            const errorDiv = document.getElementById('error-message');
-            const loginBtn = document.getElementById('login-btn');
-            
-            loginBtn.textContent = 'Logging in...';
-            loginBtn.disabled = true;
-            hideMessages();
-            
-            try {
-                const response = await fetch(API_BASE + '/auth/login', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username, password })
-                });
-                
-                const data = await response.json();
-                
-                if (response.ok) {
-                    localStorage.setItem('texon_token', data.token);
-                    localStorage.setItem('texon_user', JSON.stringify(data.user));
-                    currentToken = data.token;
-                    currentUser = data.user;
-                    showApp();
-                } else {
-                    showError(data.error || 'Login failed');
-                }
-            } catch (error) {
-                showError('Network error: ' + error.message);
-            }
-            
-            loginBtn.textContent = 'Login';
-            loginBtn.disabled = false;
-        }
-
-        function handleLogout() {
-            localStorage.removeItem('texon_token');
-            localStorage.removeItem('texon_user');
-            currentToken = null;
-            currentUser = null;
-            showLogin();
-        }
-
-        function showLogin() {
-            document.getElementById('login-container').style.display = 'flex';
-            document.getElementById('app').style.display = 'none';
-        }
-
-        function showApp() {
-            document.getElementById('login-container').style.display = 'none';
-            document.getElementById('app').style.display = 'block';
-            document.getElementById('welcome-user').textContent = 'Welcome, ' + currentUser.username;
-            
-            loadConfigStatus();
-            loadReports();
-            
-            if (currentUser.role !== 'admin') {
-                document.getElementById('nav-users').style.display = 'none';
-            }
-        }
-
-        function showTab(tabName) {
-            document.querySelectorAll('.tab-content').forEach(tab => {
-                tab.classList.remove('active');
-            });
-            document.querySelectorAll('nav button').forEach(btn => {
-                btn.classList.remove('active');
-            });
-            document.getElementById('tab-' + tabName).classList.add('active');
-            document.getElementById('nav-' + tabName).classList.add('active');
-        }
-
-        async function loadConfigStatus() {
-            try {
-                const response = await fetch(API_BASE + '/config-status', {
-                    headers: { 'Authorization': 'Bearer ' + currentToken }
-                });
-                const status = await response.json();
-                
-                let statusHTML = '<ul style="margin: 10px 0;">';
-                statusHTML += '<li>' + (status.supabase_configured ? '✅' : '❌') + ' Database (Supabase)</li>';
-                statusHTML += '<li>' + (status.brightpearl_configured ? '✅' : '⚠️') + ' Brightpearl API</li>';
-                statusHTML += '<li>' + (status.infoplus_configured ? '✅' : '⚠️') + ' Infoplus API</li>';
-                statusHTML += '<li>' + (status.email_configured ? '✅' : '⚠️') + ' Email Configuration</li>';
-                statusHTML += '</ul>';
-                
-                if (status.overall_ready) {
-                    statusHTML += '<p style="color: green; font-weight: bold; margin-top: 15px;">🎉 System fully configured and ready!</p>';
-                } else {
-                    statusHTML += '<p style="color: orange; margin-top: 15px;">⚠️ Some configurations pending. Edit .env file to add API credentials.</p>';
-                }
-                
-                document.getElementById('config-details').innerHTML = statusHTML;
-            } catch (error) {
-                console.error('Error loading config status:', error);
-                document.getElementById('config-details').innerHTML = '<p>Error loading configuration status</p>';
-            }
-        }
-
-        async function runComparison() {
-            const button = document.getElementById('run-comparison');
-            const resultDiv = document.getElementById('comparison-result');
-            
-            button.textContent = 'Running...';
-            button.disabled = true;
-            resultDiv.style.display = 'none';
-            
-            try {
-                const response = await fetch(API_BASE + '/run-comparison', {
-                    method: 'POST',
-                    headers: { 'Authorization': 'Bearer ' + currentToken }
-                });
-                
-                const data = await response.json();
-                
-                if (response.ok) {
-                    resultDiv.innerHTML = 
-                        '<h4>✅ Comparison Complete!</h4>' +
-                        '<p><strong>Total Discrepancies:</strong> ' + data.totalDiscrepancies + '</p>' +
-                        '<p><strong>Status:</strong> ' + data.message + '</p>' +
-                        (data.totalDiscrepancies > 0 ? 
-                            '<p><strong>Sample:</strong> ' + data.discrepancies[0].sku + ' (diff: ' + data.discrepancies[0].difference + ')</p>' : 
-                            '<p style="color: green;">All inventory levels are in sync!</p>');
-                    resultDiv.style.display = 'block';
-                    
-                    document.getElementById('latest-report').textContent = data.totalDiscrepancies + ' discrepancies';
-                    document.getElementById('latest-report-date').textContent = 'Just now';
-                    
-                    loadReports();
-                } else {
-                    throw new Error(data.error || 'Comparison failed');
-                }
-            } catch (error) {
-                resultDiv.innerHTML = '<h4>❌ Error</h4><p>' + error.message + '</p>';
-                resultDiv.style.display = 'block';
-            }
-            
-            button.textContent = 'Run Comparison Now';
-            button.disabled = false;
-        }
-
-        async function loadReports() {
-            try {
-                const response = await fetch(API_BASE + '/reports', {
-                    headers: { 'Authorization': 'Bearer ' + currentToken }
-                });
-                const reports = await response.json();
-                
-                const reportsContainer = document.getElementById('reports-list');
-                
-                if (reports.length === 0) {
-                    reportsContainer.innerHTML = '<p>No reports yet. Run your first comparison to see results here.</p>';
-                    return;
-                }
-                
-                let html = '';
-                reports.forEach(report => {
-                    html += 
-                        '<div class="report-card">' +
-                            '<div class="report-header">' +
-                                '<h3>' + new Date(report.created_at).toLocaleDateString() + '</h3>' +
-                                '<span class="status ' + (report.total_discrepancies === 0 ? 'success' : 'warning') + '">' +
-                                    report.total_discrepancies + ' discrepancies' +
-                                '</span>' +
-                            '</div>' +
-                            '<div>' +
-                                '<p>' + new Date(report.created_at).toLocaleString() + '</p>' +
-                            '</div>' +
-                        '</div>';
-                });
-                
-                reportsContainer.innerHTML = html;
-                
-                if (reports.length > 0) {
-                    document.getElementById('latest-report').textContent = reports[0].total_discrepancies + ' discrepancies';
-                    document.getElementById('latest-report-date').textContent = new Date(reports[0].created_at).toLocaleDateString();
-                }
-            } catch (error) {
-                console.error('Error loading reports:', error);
-                document.getElementById('reports-list').innerHTML = '<p>Error loading reports.</p>';
-            }
-        }
-
-        function showError(message) {
-            const errorDiv = document.getElementById('error-message');
-            errorDiv.textContent = message;
-            errorDiv.style.display = 'block';
-            setTimeout(() => errorDiv.style.display = 'none', 5000);
-        }
-
-        function showSuccess(message) {
-            const successDiv = document.getElementById('success-message');
-            successDiv.innerHTML = message;
-            successDiv.style.display = 'block';
-            setTimeout(() => successDiv.style.display = 'none', 3000);
-        }
-
-        function hideMessages() {
-            document.getElementById('error-message').style.display = 'none';
-            document.getElementById('success-message').style.display = 'none';
-        }
-    </script>
-</body>
-</html>
-    `);
+        res.json(settings);
+    } catch (error) {
+        console.error('❌ Settings fetch error:', error);
+        res.status(500).json({ error: error.message });
+    }
 });
 
-app.get('/texon-inventory-comparison/*', (req, res) => {
-    res.redirect('/texon-inventory-comparison');
+// User management routes
+app.get('/texon-inventory-comparison/api/users', authenticateToken, async (req, res) => {
+    if (req.user.role !== 'admin') {
+        return res.status(403).json({ error: 'Admin access required' });
+    }
+    
+    try {
+        const { data, error } = await supabase
+            .from('app_users')
+            .select('id, username, email, role, created_at, last_login, is_active')
+            .order('created_at', { ascending: false });
+
+        if (error) throw error;
+        res.json(data);
+    } catch (error) {
+        console.error('❌ Users fetch error:', error);
+        res.status(500).json({ error: error.message });
+    }
 });
+
+// Test endpoint
+app.get('/texon-inventory-comparison/api/test', authenticateToken, async (req, res) => {
+    res.json({
+        message: 'API test successful',
+        user: req.user,
+        timestamp: new Date().toISOString(),
+        server_status: 'OK'
+    });
+});
+
+// Serve React app - IMPORTANT: This must be the last route
+app.get('/texon-inventory-comparison*', (req, res) => {
+    console.log(`Serving React app for: ${req.path}`);
+    res.sendFile(path.join(__dirname, 'build', 'index.html'));
+});
+
+// Schedule daily inventory comparison at 7 PM (commented out for now)
+// cron.schedule('0 19 * * *', async () => {
+//     console.log('⏰ Running scheduled inventory comparison...');
+//     // Add scheduled comparison logic here
+// });
 
 // Start server
-const server = app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Texon Inventory Server running on 0.0.0.0:${PORT}`);
     console.log(`🌐 Access: https://collegesportsdirectory.com/texon-inventory-comparison`);
     console.log(`🔐 Default login: admin / changeme123`);
 });
 
-process.on('SIGTERM', () => {
-    console.log('Shutting down gracefully...');
-    server.close(() => process.exit(0));
+// Graceful shutdown
+process.on('SIGINT', () => {
+    console.log('\nShutting down gracefully...');
+    process.exit(0);
 });
 
-process.on('SIGINT', () => {
-    console.log('Shutting down gracefully...');
-    server.close(() => process.exit(0));
+process.on('SIGTERM', () => {
+    console.log('\nShutting down gracefully...');
+    process.exit(0);
 });
+
+module.exports = app;
