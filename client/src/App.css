@@ -625,3 +625,412 @@ nav button.active {
     border: 1px solid #ccc;
   }
 }
+
+/* Fixed User Management CSS - Replace the existing user card styles in your App.css */
+
+.users-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+  gap: 20px;
+}
+
+.user-card {
+  background: white;
+  border: 1px solid #dee2e6;
+  border-radius: 8px;
+  padding: 20px;
+  margin-bottom: 15px;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.user-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 15px;
+  flex-wrap: wrap;
+}
+
+.user-header strong {
+  font-size: 18px;
+  color: #333;
+}
+
+.user-role {
+  padding: 3px 8px;
+  border-radius: 12px;
+  font-size: 10px;
+  font-weight: bold;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.user-role.admin {
+  background: #dc3545;
+  color: white;
+}
+
+.user-role.user {
+  background: #28a745;
+  color: white;
+}
+
+.user-status.inactive {
+  padding: 3px 8px;
+  border-radius: 12px;
+  font-size: 10px;
+  font-weight: bold;
+  background: #ffc107;
+  color: #212529;
+}
+
+.user-details {
+  font-size: 14px;
+  line-height: 1.6;
+  margin-bottom: 20px;
+  flex-grow: 1;
+}
+
+.user-details div {
+  margin-bottom: 8px;
+  word-break: break-word;
+}
+
+.user-details strong {
+  color: #555;
+  font-weight: 600;
+}
+
+.user-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-start;
+  align-items: center;
+  margin-top: auto;
+  padding-top: 15px;
+  border-top: 1px solid #f0f0f0;
+}
+
+.user-actions button {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  transition: all 0.2s ease;
+  min-width: 70px;
+}
+
+.user-actions button:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.user-actions button:first-child {
+  background-color: #007bff;
+  color: white;
+}
+
+.user-actions button:first-child:hover {
+  background-color: #0056b3;
+}
+
+.user-actions button:last-child {
+  background-color: #dc3545;
+  color: white;
+}
+
+.user-actions button:last-child:hover {
+  background-color: #c82333;
+}
+
+/* Improved responsive design for user cards */
+@media (max-width: 768px) {
+  .users-list {
+    grid-template-columns: 1fr;
+  }
+  
+  .user-card {
+    margin-bottom: 20px;
+  }
+  
+  .user-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  
+  .user-actions {
+    justify-content: center;
+    gap: 15px;
+  }
+  
+  .user-actions button {
+    flex: 1;
+    max-width: 120px;
+  }
+}
+
+@media (max-width: 480px) {
+  .user-actions {
+    flex-direction: column;
+    gap: 10px;
+  }
+  
+  .user-actions button {
+    width: 100%;
+    max-width: none;
+  }
+}
+
+/* Settings Page CSS - Add to your App.css file */
+
+.settings {
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.settings-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 30px;
+  padding-bottom: 20px;
+  border-bottom: 2px solid #e9ecef;
+}
+
+.settings-header h2 {
+  margin: 0;
+  color: #333;
+}
+
+.save-settings-btn {
+  background: #28a745 !important;
+  font-weight: 600;
+  padding: 12px 24px;
+  font-size: 14px;
+}
+
+.save-settings-btn:hover:not(:disabled) {
+  background: #218838 !important;
+}
+
+/* Configuration Overview */
+.config-overview {
+  background: #f8f9fa;
+  border: 1px solid #dee2e6;
+  border-radius: 8px;
+  padding: 25px;
+  margin-bottom: 30px;
+}
+
+.config-overview h3 {
+  margin: 0 0 20px 0;
+  color: #495057;
+  font-size: 18px;
+}
+
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 15px;
+  margin-bottom: 20px;
+}
+
+.status-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-radius: 6px;
+  font-weight: 500;
+  font-size: 14px;
+}
+
+.status-item.configured {
+  background: #d4edda;
+  color: #155724;
+  border: 1px solid #c3e6cb;
+}
+
+.status-item.not-configured {
+  background: #fff3cd;
+  color: #856404;
+  border: 1px solid #ffeaa7;
+}
+
+.status-icon {
+  font-size: 16px;
+}
+
+.status-message {
+  font-size: 16px;
+  font-weight: 600;
+  text-align: center;
+  padding: 15px;
+  border-radius: 6px;
+  margin: 0;
+}
+
+.status-message.success {
+  background: #d4edda;
+  color: #155724;
+  border: 1px solid #c3e6cb;
+}
+
+.status-message.warning {
+  background: #fff3cd;
+  color: #856404;
+  border: 1px solid #ffeaa7;
+}
+
+/* Settings Sections */
+.settings-section {
+  background: white;
+  border: 1px solid #dee2e6;
+  border-radius: 8px;
+  padding: 25px;
+  margin-bottom: 25px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+
+.settings-section h3 {
+  margin: 0 0 20px 0;
+  color: #495057;
+  font-size: 18px;
+  font-weight: 600;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #e9ecef;
+}
+
+.setting-group {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.setting-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.setting-label {
+  font-weight: 600;
+  color: #495057;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.setting-label input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+  cursor: pointer;
+}
+
+.setting-input {
+  padding: 10px 14px;
+  border: 1px solid #ced4da;
+  border-radius: 6px;
+  font-size: 14px;
+  transition: border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
+  max-width: 400px;
+}
+
+.setting-input:focus {
+  outline: 0;
+  border-color: #80bdff;
+  box-shadow: 0 0 0 0.2rem rgba(0, 123, 255, 0.25);
+}
+
+.setting-description {
+  font-size: 13px;
+  color: #6c757d;
+  margin: 0;
+  line-height: 1.4;
+}
+
+/* Email Test Section */
+.email-test {
+  background: #f8f9fa;
+  padding: 20px;
+  border-radius: 6px;
+  border: 1px solid #dee2e6;
+}
+
+.email-test button {
+  margin-bottom: 10px;
+}
+
+/* Access Denied */
+.access-denied {
+  background: #fff3cd;
+  border: 1px solid #ffeaa7;
+  border-radius: 8px;
+  padding: 30px;
+  text-align: center;
+}
+
+.access-denied p {
+  font-size: 16px;
+  color: #856404;
+  margin: 0 0 10px 0;
+}
+
+/* Settings Footer */
+.settings-footer {
+  background: #f8f9fa;
+  border: 1px solid #dee2e6;
+  border-radius: 8px;
+  padding: 25px;
+  text-align: center;
+  margin-top: 30px;
+}
+
+.save-note {
+  margin: 15px 0 0 0;
+  font-size: 13px;
+  color: #6c757d;
+  font-style: italic;
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+  .settings-header {
+    flex-direction: column;
+    gap: 20px;
+    align-items: stretch;
+  }
+  
+  .status-grid {
+    grid-template-columns: 1fr;
+  }
+  
+  .setting-input {
+    max-width: 100%;
+  }
+  
+  .settings-section {
+    padding: 20px;
+  }
+}
+
+@media (max-width: 480px) {
+  .settings {
+    padding: 0 10px;
+  }
+  
+  .settings-section {
+    padding: 15px;
+  }
+  
+  .config-overview {
+    padding: 20px;
+  }
+}

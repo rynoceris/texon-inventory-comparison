@@ -107,6 +107,7 @@ app.get('/texon-inventory-comparison/api/health', (req, res) => {
 });
 
 // Authentication routes
+// Enhanced login route to include first_name and last_name
 app.post('/texon-inventory-comparison/api/auth/login', async (req, res) => {
     try {
         const { username, password } = req.body;
@@ -116,9 +117,20 @@ app.post('/texon-inventory-comparison/api/auth/login', async (req, res) => {
             return res.status(400).json({ error: 'Username and password required' });
         }
 
-        const user = await getUserByUsername(username);
-        if (!user) {
+        // Enhanced user selection to include new fields
+        const { data: user, error } = await supabase
+            .from('app_users')
+            .select('*')
+            .eq('username', username)
+            .single();
+
+        if (error || !user) {
             return res.status(401).json({ error: 'Invalid credentials' });
+        }
+
+        // Check if user is active
+        if (!user.is_active) {
+            return res.status(401).json({ error: 'Account is deactivated' });
         }
 
         const isValidPassword = await bcrypt.compare(password, user.password_hash);
@@ -144,6 +156,8 @@ app.post('/texon-inventory-comparison/api/auth/login', async (req, res) => {
                 id: user.id,
                 username: user.username,
                 email: user.email,
+                first_name: user.first_name,
+                last_name: user.last_name,
                 role: user.role
             }
         });
@@ -1364,6 +1378,150 @@ async function sendInventoryReportEmail(reportData, recipients) {
     }
 }
 
+// Welcome email function
+async function sendWelcomeEmail(user, temporaryPassword) {
+    if (!emailTransporter) {
+        throw new Error('Email service not configured');
+    }
+
+    try {
+        const subject = 'Welcome to Texon Inventory Comparison System';
+        
+        const htmlContent = `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                <h2 style="color: #333;">Welcome to Texon Inventory Comparison!</h2>
+                
+                <p>Hello ${user.first_name} ${user.last_name},</p>
+                
+                <p>Your account has been created for the Texon Inventory Comparison system. Here are your login credentials:</p>
+                
+                <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                    <p><strong>Username:</strong> ${user.username}</p>
+                    <p><strong>Email:</strong> ${user.email}</p>
+                    <p><strong>Temporary Password:</strong> ${temporaryPassword}</p>
+                    <p><strong>Role:</strong> ${user.role}</p>
+                </div>
+                
+                <p><strong>Important Security Notice:</strong></p>
+                <ul>
+                    <li>Please change your password after your first login</li>
+                    <li>Keep your login credentials secure</li>
+                    <li>Do not share your account with others</li>
+                </ul>
+                
+                <p>You can access the system at: <a href="https://collegesportsdirectory.com/texon-inventory-comparison">Texon Inventory Comparison</a></p>
+                
+                <p>If you have any questions or need assistance, please contact your system administrator.</p>
+                
+                <p>Best regards,<br>Texon Inventory Management Team</p>
+                
+                <hr style="margin: 30px 0; border: none; border-top: 1px solid #eee;">
+                <p style="font-size: 12px; color: #666;">
+                    This is an automated message. Please do not reply to this email.
+                </p>
+            </div>
+        `;
+
+        const mailOptions = {
+            from: process.env.SMTP_FROM || process.env.SMTP_USER,
+            to: user.email,
+            subject: subject,
+            html: htmlContent
+        };
+
+        const result = await emailTransporter.sendMail(mailOptions);
+        return result;
+    } catch (error) {
+        console.error('❌ Failed to send welcome email:', error);
+        throw error;
+    }
+}
+
+// Helper functions
+function isValidCronExpression(cron) {
+    // Basic cron validation - checks for 5 parts separated by spaces
+    const parts = cron.trim().split(/\s+/);
+    if (parts.length !== 5) return false;
+    
+    // More thorough validation could be added here
+    const validExpressions = [
+        '0 9 * * *', '0 12 * * *', '0 17 * * *', '0 18 * * *', 
+        '0 19 * * *', '0 20 * * *', '0 19 * * 1-5', '0 19 * * 0'
+    ];
+    
+    return validExpressions.includes(cron);
+}
+
+function isValidEmail(email) {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return emailRegex.test(email);
+}
+
+// Cron job management
+let currentCronJob = null;
+
+function updateCronJob(enabled, schedule, timezone) {
+    try {
+        // Stop existing cron job
+        if (currentCronJob) {
+            currentCronJob.destroy();
+            currentCronJob = null;
+            console.log('🔄 Stopped existing cron job');
+        }
+
+        // Start new cron job if enabled
+        if (enabled && schedule) {
+            currentCronJob = cron.schedule(schedule, async () => {
+                console.log('⏰ Running scheduled inventory comparison...');
+                try {
+                    await performRealInventoryComparison();
+                    console.log('✅ Scheduled comparison completed successfully');
+                } catch (error) {
+                    console.error('❌ Scheduled comparison failed:', error);
+                }
+            }, {
+                scheduled: true,
+                timezone: timezone || 'America/New_York'
+            });
+
+            console.log(`✅ Cron job scheduled: ${schedule} (${timezone || 'America/New_York'})`);
+        } else {
+            console.log('⏸️ Cron job disabled');
+        }
+    } catch (error) {
+        console.error('❌ Error updating cron job:', error);
+    }
+}
+
+// Initialize cron job on server start
+async function initializeCronJob() {
+    try {
+        const { data: settings, error } = await supabase
+            .from('app_settings')
+            .select('*')
+            .in('key', ['cron_enabled', 'cron_schedule', 'cron_timezone']);
+
+        if (error) {
+            console.log('⚠️ Could not load cron settings from database');
+            return;
+        }
+
+        const settingsObj = {};
+        settings.forEach(setting => {
+            settingsObj[setting.key] = setting.value === 'true' ? true : setting.value;
+        });
+
+        if (settingsObj.cron_enabled === true && settingsObj.cron_schedule) {
+            updateCronJob(true, settingsObj.cron_schedule, settingsObj.cron_timezone);
+        }
+    } catch (error) {
+        console.log('⚠️ Error initializing cron job:', error);
+    }
+}
+
+// Call this after your database connection is established
+initializeCronJob();
+
 app.post('/texon-inventory-comparison/api/run-comparison', authenticateToken, async (req, res) => {
     try {
         console.log('🔄 Starting manual inventory comparison...');
@@ -1665,8 +1823,76 @@ app.get('/texon-inventory-comparison/api/reports/:reportId/excel', authenticateT
     }
 });
 
-// Settings routes
+// Delete a specific report by ID (Admin only)
+app.delete('/texon-inventory-comparison/api/reports/:reportId', authenticateToken, async (req, res) => {
+    try {
+        // Check if user is admin
+        if (req.user.role !== 'admin') {
+            return res.status(403).json({
+                success: false,
+                error: 'Admin access required to delete reports'
+            });
+        }
+
+        const { reportId } = req.params;
+        
+        console.log(`🗑️ Admin ${req.user.username} deleting report ID: ${reportId}`);
+
+        // Check if report exists
+        const { data: report, error: fetchError } = await supabase
+            .from('inventory_reports')
+            .select('id, date, created_at, total_discrepancies')
+            .eq('id', reportId)
+            .single();
+
+        if (fetchError) {
+            if (fetchError.code === 'PGRST116') {
+                return res.status(404).json({
+                    success: false,
+                    error: 'Report not found'
+                });
+            }
+            throw fetchError;
+        }
+
+        // Delete the report
+        const { error: deleteError } = await supabase
+            .from('inventory_reports')
+            .delete()
+            .eq('id', reportId);
+
+        if (deleteError) throw deleteError;
+
+        console.log(`✅ Successfully deleted report ${reportId} from ${report.date}`);
+
+        res.json({
+            success: true,
+            message: `Successfully deleted report from ${report.date}`,
+            deleted_report: {
+                id: reportId,
+                date: report.date,
+                created_at: report.created_at,
+                total_discrepancies: report.total_discrepancies
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ Error deleting report:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Enhanced Settings routes with full CRUD functionality
+
+// Get all settings
 app.get('/texon-inventory-comparison/api/settings', authenticateToken, async (req, res) => {
+    if (req.user.role !== 'admin') {
+        return res.status(403).json({ error: 'Admin access required' });
+    }
+
     try {
         const { data, error } = await supabase
             .from('app_settings')
@@ -1674,9 +1900,19 @@ app.get('/texon-inventory-comparison/api/settings', authenticateToken, async (re
 
         if (error) throw error;
 
+        // Convert array of settings to object
         const settings = {};
         data.forEach(setting => {
-            settings[setting.key] = setting.value;
+            // Handle boolean conversion
+            if (setting.value === 'true') {
+                settings[setting.key] = true;
+            } else if (setting.value === 'false') {
+                settings[setting.key] = false;
+            } else if (!isNaN(setting.value) && setting.value !== '') {
+                settings[setting.key] = Number(setting.value);
+            } else {
+                settings[setting.key] = setting.value;
+            }
         });
 
         res.json(settings);
@@ -1686,7 +1922,186 @@ app.get('/texon-inventory-comparison/api/settings', authenticateToken, async (re
     }
 });
 
-// User management routes
+// Update settings
+app.put('/texon-inventory-comparison/api/settings', authenticateToken, async (req, res) => {
+    if (req.user.role !== 'admin') {
+        return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    try {
+        const newSettings = req.body;
+        console.log(`⚙️ Admin ${req.user.username} updating settings:`, Object.keys(newSettings));
+
+        // Validate cron expression if provided
+        if (newSettings.cron_schedule) {
+            if (!isValidCronExpression(newSettings.cron_schedule)) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Invalid cron expression'
+                });
+            }
+        }
+
+        // Validate email recipients if provided
+        if (newSettings.email_recipients) {
+            const emails = newSettings.email_recipients.split(',').map(e => e.trim());
+            for (const email of emails) {
+                if (email && !isValidEmail(email)) {
+                    return res.status(400).json({
+                        success: false,
+                        error: `Invalid email address: ${email}`
+                    });
+                }
+            }
+        }
+
+        // Update each setting
+        for (const [key, value] of Object.entries(newSettings)) {
+            // Convert value to string for storage
+            const stringValue = String(value);
+
+            // Check if setting exists
+            const { data: existingSetting, error: checkError } = await supabase
+                .from('app_settings')
+                .select('key')
+                .eq('key', key)
+                .single();
+
+            if (existingSetting) {
+                // Update existing setting
+                const { error: updateError } = await supabase
+                    .from('app_settings')
+                    .update({
+                        value: stringValue,
+                        updated_at: new Date().toISOString(),
+                        updated_by: req.user.username
+                    })
+                    .eq('key', key);
+
+                if (updateError) throw updateError;
+            } else {
+                // Create new setting
+                const { error: insertError } = await supabase
+                    .from('app_settings')
+                    .insert([{
+                        key: key,
+                        value: stringValue,
+                        created_at: new Date().toISOString(),
+                        updated_at: new Date().toISOString(),
+                        created_by: req.user.username,
+                        updated_by: req.user.username
+                    }]);
+
+                if (insertError) throw insertError;
+            }
+        }
+
+        // Update cron job if schedule changed
+        if (newSettings.cron_enabled !== undefined || newSettings.cron_schedule) {
+            updateCronJob(newSettings.cron_enabled, newSettings.cron_schedule, newSettings.cron_timezone);
+        }
+
+        console.log(`✅ Settings updated successfully by ${req.user.username}`);
+
+        res.json({
+            success: true,
+            message: 'Settings updated successfully'
+        });
+
+    } catch (error) {
+        console.error('❌ Settings update error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Test email configuration
+app.post('/texon-inventory-comparison/api/test-email', authenticateToken, async (req, res) => {
+    if (req.user.role !== 'admin') {
+        return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    try {
+        const { recipients } = req.body;
+
+        if (!recipients || !recipients.trim()) {
+            return res.status(400).json({
+                success: false,
+                error: 'Email recipients required'
+            });
+        }
+
+        if (!emailTransporter) {
+            return res.status(400).json({
+                success: false,
+                error: 'Email service not configured. Check SMTP settings in environment variables.'
+            });
+        }
+
+        console.log(`📧 Admin ${req.user.username} testing email to: ${recipients}`);
+
+        const subject = 'Texon Inventory Comparison - Test Email';
+        const htmlContent = `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                <h2 style="color: #333;">📧 Email Configuration Test</h2>
+                
+                <p>Hello!</p>
+                
+                <p>This is a test email from the Texon Inventory Comparison system to verify that email notifications are working correctly.</p>
+                
+                <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                    <h3 style="margin: 0 0 10px 0; color: #495057;">Test Details:</h3>
+                    <p><strong>Sent by:</strong> ${req.user.username}</p>
+                    <p><strong>Timestamp:</strong> ${new Date().toLocaleString()}</p>
+                    <p><strong>System:</strong> Texon Inventory Comparison</p>
+                </div>
+                
+                <p><strong>✅ Success!</strong> If you're reading this email, your email configuration is working properly.</p>
+                
+                <p>You can expect to receive inventory comparison reports when:</p>
+                <ul>
+                    <li>Scheduled comparisons complete</li>
+                    <li>Discrepancies are found between systems</li>
+                    <li>Manual comparisons are run (if configured)</li>
+                </ul>
+                
+                <p>Best regards,<br>Texon Inventory Management System</p>
+                
+                <hr style="margin: 30px 0; border: none; border-top: 1px solid #eee;">
+                <p style="font-size: 12px; color: #666;">
+                    This is a test message sent from the system settings page.
+                </p>
+            </div>
+        `;
+
+        const mailOptions = {
+            from: process.env.SMTP_FROM || process.env.SMTP_USER,
+            to: recipients,
+            subject: subject,
+            html: htmlContent
+        };
+
+        await emailTransporter.sendMail(mailOptions);
+
+        console.log(`✅ Test email sent successfully to: ${recipients}`);
+
+        res.json({
+            success: true,
+            message: 'Test email sent successfully!'
+        });
+
+    } catch (error) {
+        console.error('❌ Test email error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Get all users (enhanced with new fields)
 app.get('/texon-inventory-comparison/api/users', authenticateToken, async (req, res) => {
     if (req.user.role !== 'admin') {
         return res.status(403).json({ error: 'Admin access required' });
@@ -1695,7 +2110,7 @@ app.get('/texon-inventory-comparison/api/users', authenticateToken, async (req, 
     try {
         const { data, error } = await supabase
             .from('app_users')
-            .select('id, username, email, role, created_at, last_login, is_active')
+            .select('id, username, email, first_name, last_name, role, created_at, last_login, is_active')
             .order('created_at', { ascending: false });
 
         if (error) throw error;
@@ -1703,6 +2118,260 @@ app.get('/texon-inventory-comparison/api/users', authenticateToken, async (req, 
     } catch (error) {
         console.error('❌ Users fetch error:', error);
         res.status(500).json({ error: error.message });
+    }
+});
+
+// Create new user
+app.post('/texon-inventory-comparison/api/users', authenticateToken, async (req, res) => {
+    if (req.user.role !== 'admin') {
+        return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    try {
+        const { username, email, first_name, last_name, password, role = 'user', is_active = true } = req.body;
+
+        // Validation
+        if (!username || !email || !first_name || !last_name || !password) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Username, email, first name, last name, and password are required' 
+            });
+        }
+
+        if (password.length < 6) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Password must be at least 6 characters long' 
+            });
+        }
+
+        // Check if username already exists
+        const { data: existingUser, error: checkError } = await supabase
+            .from('app_users')
+            .select('id')
+            .eq('username', username)
+            .single();
+
+        if (existingUser) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Username already exists' 
+            });
+        }
+
+        // Check if email already exists
+        const { data: existingEmail, error: emailCheckError } = await supabase
+            .from('app_users')
+            .select('id')
+            .eq('email', email)
+            .single();
+
+        if (existingEmail) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Email already exists' 
+            });
+        }
+
+        // Hash password
+        const saltRounds = 10;
+        const hashedPassword = await bcrypt.hash(password, saltRounds);
+
+        // Create user
+        const { data: newUser, error: insertError } = await supabase
+            .from('app_users')
+            .insert([{
+                username: username.trim(),
+                email: email.trim(),
+                first_name: first_name.trim(),
+                last_name: last_name.trim(),
+                password_hash: hashedPassword,
+                role: role,
+                is_active: is_active,
+                created_at: new Date().toISOString()
+            }])
+            .select('id, username, email, first_name, last_name, role, is_active, created_at')
+            .single();
+
+        if (insertError) throw insertError;
+
+        console.log(`✅ New user created: ${username} by admin ${req.user.username}`);
+
+        // Send welcome email if email service is configured
+        if (emailTransporter) {
+            try {
+                await sendWelcomeEmail(newUser, password);
+                console.log(`📧 Welcome email sent to ${email}`);
+            } catch (emailError) {
+                console.error('❌ Failed to send welcome email:', emailError);
+                // Don't fail the user creation if email fails
+            }
+        }
+
+        res.json({
+            success: true,
+            message: 'User created successfully',
+            user: newUser
+        });
+
+    } catch (error) {
+        console.error('❌ User creation error:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: error.message 
+        });
+    }
+});
+
+// Update user
+app.put('/texon-inventory-comparison/api/users/:userId', authenticateToken, async (req, res) => {
+    if (req.user.role !== 'admin') {
+        return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    try {
+        const { userId } = req.params;
+        const { email, first_name, last_name, password, role, is_active } = req.body;
+
+        // Validation
+        if (!email || !first_name || !last_name) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Email, first name, and last name are required' 
+            });
+        }
+
+        // Check if user exists
+        const { data: existingUser, error: checkError } = await supabase
+            .from('app_users')
+            .select('id, username, email')
+            .eq('id', userId)
+            .single();
+
+        if (checkError || !existingUser) {
+            return res.status(404).json({ 
+                success: false, 
+                error: 'User not found' 
+            });
+        }
+
+        // Check if email is being changed and if new email already exists
+        if (email !== existingUser.email) {
+            const { data: emailExists, error: emailCheckError } = await supabase
+                .from('app_users')
+                .select('id')
+                .eq('email', email)
+                .neq('id', userId)
+                .single();
+
+            if (emailExists) {
+                return res.status(400).json({ 
+                    success: false, 
+                    error: 'Email already exists' 
+                });
+            }
+        }
+
+        // Prepare update data
+        const updateData = {
+            email: email.trim(),
+            first_name: first_name.trim(),
+            last_name: last_name.trim(),
+            role: role,
+            is_active: is_active
+        };
+
+        // Only update password if provided
+        if (password && password.trim()) {
+            if (password.length < 6) {
+                return res.status(400).json({ 
+                    success: false, 
+                    error: 'Password must be at least 6 characters long' 
+                });
+            }
+            const saltRounds = 10;
+            updateData.password_hash = await bcrypt.hash(password, saltRounds);
+        }
+
+        // Update user
+        const { data: updatedUser, error: updateError } = await supabase
+            .from('app_users')
+            .update(updateData)
+            .eq('id', userId)
+            .select('id, username, email, first_name, last_name, role, is_active, created_at, last_login')
+            .single();
+
+        if (updateError) throw updateError;
+
+        console.log(`✅ User updated: ${existingUser.username} by admin ${req.user.username}`);
+
+        res.json({
+            success: true,
+            message: 'User updated successfully',
+            user: updatedUser
+        });
+
+    } catch (error) {
+        console.error('❌ User update error:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: error.message 
+        });
+    }
+});
+
+// Delete user
+app.delete('/texon-inventory-comparison/api/users/:userId', authenticateToken, async (req, res) => {
+    if (req.user.role !== 'admin') {
+        return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    try {
+        const { userId } = req.params;
+
+        // Prevent admin from deleting themselves
+        if (parseInt(userId) === req.user.userId) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'You cannot delete your own account' 
+            });
+        }
+
+        // Check if user exists
+        const { data: existingUser, error: checkError } = await supabase
+            .from('app_users')
+            .select('id, username')
+            .eq('id', userId)
+            .single();
+
+        if (checkError || !existingUser) {
+            return res.status(404).json({ 
+                success: false, 
+                error: 'User not found' 
+            });
+        }
+
+        // Delete user
+        const { error: deleteError } = await supabase
+            .from('app_users')
+            .delete()
+            .eq('id', userId);
+
+        if (deleteError) throw deleteError;
+
+        console.log(`✅ User deleted: ${existingUser.username} by admin ${req.user.username}`);
+
+        res.json({
+            success: true,
+            message: `User ${existingUser.username} deleted successfully`
+        });
+
+    } catch (error) {
+        console.error('❌ User deletion error:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: error.message 
+        });
     }
 });
 
