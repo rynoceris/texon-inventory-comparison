@@ -122,27 +122,123 @@ function Dashboard({ token }) {
 
   const runComparison = async () => {
     setIsRunning(true);
-    setComparisonResult(null);
-
+    setComparisonResult({ message: '🔄 Starting inventory comparison...' });
+  
     try {
-      const response = await fetch(`${API_BASE}/run-comparison`, {
+      // Start the comparison (don't wait for completion)
+      fetch(`${API_BASE}/run-comparison`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${token}` }
+      }).catch(err => {
+        console.log('Background comparison may have completed despite error:', err);
       });
-
-      const data = await response.json();
-
-      if (response.ok) {
-        setComparisonResult(data);
-        loadLatestReport(); // Refresh latest report
-      } else {
-        setComparisonResult({ error: data.error });
-      }
+  
+      // Remember the start time to identify new reports
+      const comparisonStartTime = new Date();
+  
+      // Poll for results every 10 seconds
+      let attempts = 0;
+      const maxAttempts = 36; // 6 minutes total (36 * 10 seconds)
+  
+      const pollForResults = async () => {
+        attempts++;
+  
+        try {
+          // Check for new reports
+          const reportsResponse = await fetch(`${API_BASE}/latest-report`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+          });
+  
+          if (reportsResponse.ok) {
+            const latestReport = await reportsResponse.json();
+  
+            // Check if this is a new report (created after we started)
+            if (latestReport && latestReport.created_at) {
+              const reportTime = new Date(latestReport.created_at);
+  
+              if (reportTime > comparisonStartTime) {
+              // New report found! Comparison completed successfully
+              
+              // Safely parse discrepancies with error handling
+              let discrepancies = [];
+              try {
+                if (latestReport.discrepancies) {
+                  // Check if it's already an object/array
+                  if (typeof latestReport.discrepancies === 'string') {
+                    discrepancies = JSON.parse(latestReport.discrepancies);
+                  } else if (Array.isArray(latestReport.discrepancies)) {
+                    discrepancies = latestReport.discrepancies;
+                  } else {
+                    console.log('Discrepancies is an object:', latestReport.discrepancies);
+                    discrepancies = [];
+                  }
+                }
+              } catch (parseError) {
+                console.error('Error parsing discrepancies:', parseError);
+                console.log('Raw discrepancies data:', latestReport.discrepancies);
+                discrepancies = [];
+              }
+              
+              const successResult = {
+                success: true,
+                totalDiscrepancies: latestReport.total_discrepancies,
+                brightpearlItems: latestReport.brightpearl_total_items,
+                infoplusItems: latestReport.infoplus_total_items,
+                discrepancies: discrepancies,
+                message: `✅ Comparison completed! Found ${latestReport.total_discrepancies} discrepancies.`
+              };
+  
+                setComparisonResult(successResult);
+                setLatestReport(latestReport); // Update the latest report display
+                setIsRunning(false);
+                return; // Success - stop polling
+              }
+            }
+          }
+  
+          // Not completed yet, continue polling if we haven't exceeded max attempts
+          if (attempts < maxAttempts) {
+            const elapsed = Math.floor(attempts * 10);
+            setComparisonResult({ 
+              message: `🔄 Comparison in progress... (${elapsed}s elapsed)` 
+            });
+            setTimeout(pollForResults, 10000); // Check again in 10 seconds
+          } else {
+            // Timed out
+            setComparisonResult({ 
+              message: '⏰ Comparison is taking longer than expected. Please check the Reports tab manually in a few minutes.',
+              error: 'Timeout - comparison may still be running in background'
+            });
+            setIsRunning(false);
+          }
+  
+        } catch (pollError) {
+          console.error('Polling error:', pollError);
+          
+          if (attempts < maxAttempts) {
+            // Continue polling despite the error
+            setTimeout(pollForResults, 10000);
+          } else {
+            setComparisonResult({ 
+              message: '⚠️ Unable to check comparison status. Please check the Reports tab manually.',
+              error: 'Failed to poll for results'
+            });
+            setIsRunning(false);
+          }
+        }
+      };
+  
+      // Start polling after 30 seconds (give the comparison time to get started)
+      setTimeout(pollForResults, 30000);
+  
     } catch (error) {
-      setComparisonResult({ error: error.message });
+      console.error('Comparison startup failed:', error);
+      setComparisonResult({ 
+        message: '❌ Failed to start comparison',
+        error: error.message 
+      });
+      setIsRunning(false);
     }
-
-    setIsRunning(false);
   };
 
   return (
@@ -271,10 +367,14 @@ function Settings() {
   );
 }
 
-// Reports Component
+// Replace the Reports component in your client/src/App.js with this enhanced version:
+
 function Reports({ token }) {
   const [reports, setReports] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [expandedReports, setExpandedReports] = useState(new Set());
+  const [pagination, setPagination] = useState({}); // Track pagination for each report
+  const [downloadingReports, setDownloadingReports] = useState(new Set());
 
   useEffect(() => {
     loadReports();
@@ -286,12 +386,184 @@ function Reports({ token }) {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       const data = await response.json();
-      setReports(data);
+      
+      // Parse discrepancies for each report
+      const parsedReports = data.map(report => ({
+        ...report,
+        discrepancies: (() => {
+          try {
+            if (typeof report.discrepancies === 'string') {
+              return JSON.parse(report.discrepancies);
+            } else if (Array.isArray(report.discrepancies)) {
+              return report.discrepancies;
+            } else {
+              return [];
+            }
+          } catch (e) {
+            console.error('Error parsing discrepancies for report:', report.id, e);
+            return [];
+          }
+        })()
+      }));
+      
+      setReports(parsedReports);
+      
+      // Initialize pagination for each report (start with page 1)
+      const initialPagination = {};
+      parsedReports.forEach(report => {
+        initialPagination[report.id] = { currentPage: 1, itemsPerPage: 25 };
+      });
+      setPagination(initialPagination);
+      
     } catch (error) {
       console.error('Error loading reports:', error);
     } finally {
       setLoading(false);
     }
+  };
+
+  const toggleReportExpansion = (reportId) => {
+    const newExpanded = new Set(expandedReports);
+    if (newExpanded.has(reportId)) {
+      newExpanded.delete(reportId);
+    } else {
+      newExpanded.add(reportId);
+    }
+    setExpandedReports(newExpanded);
+  };
+
+  const changePage = (reportId, newPage) => {
+    setPagination(prev => ({
+      ...prev,
+      [reportId]: {
+        ...prev[reportId],
+        currentPage: newPage
+      }
+    }));
+  };
+
+  const getPaginatedDiscrepancies = (discrepancies, reportId) => {
+    const pageInfo = pagination[reportId] || { currentPage: 1, itemsPerPage: 25 };
+    const startIndex = (pageInfo.currentPage - 1) * pageInfo.itemsPerPage;
+    const endIndex = startIndex + pageInfo.itemsPerPage;
+    return discrepancies.slice(startIndex, endIndex);
+  };
+
+  const getTotalPages = (discrepancies, reportId) => {
+    const pageInfo = pagination[reportId] || { currentPage: 1, itemsPerPage: 25 };
+    return Math.ceil(discrepancies.length / pageInfo.itemsPerPage);
+  };
+
+  const downloadExcelReport = async (report) => {
+    const reportId = report.id;
+    setDownloadingReports(prev => new Set(prev).add(reportId));
+
+    try {
+      const response = await fetch(`${API_BASE}/reports/${reportId}/excel`, {
+        method: 'GET',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to download report: ${response.statusText}`);
+      }
+
+      // Get the blob data
+      const blob = await response.blob();
+      
+      // Create download link
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `inventory-report-${report.date}-${reportId}.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+
+    } catch (error) {
+      console.error('Error downloading Excel report:', error);
+      alert(`Failed to download report: ${error.message}`);
+    } finally {
+      setDownloadingReports(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(reportId);
+        return newSet;
+      });
+    }
+  };
+
+  const renderPagination = (discrepancies, reportId) => {
+    const totalPages = getTotalPages(discrepancies, reportId);
+    const currentPage = pagination[reportId]?.currentPage || 1;
+
+    if (totalPages <= 1) return null;
+
+    const pages = [];
+    const maxVisiblePages = 5;
+    let startPage = Math.max(1, currentPage - Math.floor(maxVisiblePages / 2));
+    let endPage = Math.min(totalPages, startPage + maxVisiblePages - 1);
+
+    // Adjust start page if we're near the end
+    if (endPage - startPage + 1 < maxVisiblePages) {
+      startPage = Math.max(1, endPage - maxVisiblePages + 1);
+    }
+
+    return (
+      <div className="pagination" style={{ margin: '20px 0', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '10px' }}>
+        <button 
+          onClick={() => changePage(reportId, 1)}
+          disabled={currentPage === 1}
+          style={{ padding: '8px 12px', border: '1px solid #ddd', background: currentPage === 1 ? '#f5f5f5' : 'white', cursor: currentPage === 1 ? 'not-allowed' : 'pointer' }}
+        >
+          First
+        </button>
+        
+        <button 
+          onClick={() => changePage(reportId, currentPage - 1)}
+          disabled={currentPage === 1}
+          style={{ padding: '8px 12px', border: '1px solid #ddd', background: currentPage === 1 ? '#f5f5f5' : 'white', cursor: currentPage === 1 ? 'not-allowed' : 'pointer' }}
+        >
+          Previous
+        </button>
+
+        {Array.from({ length: endPage - startPage + 1 }, (_, i) => startPage + i).map(page => (
+          <button
+            key={page}
+            onClick={() => changePage(reportId, page)}
+            style={{
+              padding: '8px 12px',
+              border: '1px solid #ddd',
+              background: page === currentPage ? '#007bff' : 'white',
+              color: page === currentPage ? 'white' : 'black',
+              cursor: 'pointer'
+            }}
+          >
+            {page}
+          </button>
+        ))}
+
+        <button 
+          onClick={() => changePage(reportId, currentPage + 1)}
+          disabled={currentPage === totalPages}
+          style={{ padding: '8px 12px', border: '1px solid #ddd', background: currentPage === totalPages ? '#f5f5f5' : 'white', cursor: currentPage === totalPages ? 'not-allowed' : 'pointer' }}
+        >
+          Next
+        </button>
+        
+        <button 
+          onClick={() => changePage(reportId, totalPages)}
+          disabled={currentPage === totalPages}
+          style={{ padding: '8px 12px', border: '1px solid #ddd', background: currentPage === totalPages ? '#f5f5f5' : 'white', cursor: currentPage === totalPages ? 'not-allowed' : 'pointer' }}
+        >
+          Last
+        </button>
+
+        <span style={{ marginLeft: '20px', fontSize: '14px', color: '#666' }}>
+          Page {currentPage} of {totalPages} ({discrepancies.length} total discrepancies)
+        </span>
+      </div>
+    );
   };
 
   if (loading) {
@@ -301,54 +573,103 @@ function Reports({ token }) {
   return (
     <div className="reports">
       <h2>Reports History (Last 30 Days)</h2>
-      
       {reports.length === 0 ? (
         <p>No reports available yet. Run your first comparison!</p>
       ) : (
         <div className="reports-list">
           {reports.map((report, index) => (
             <div key={report.id || index} className="report-card">
-              <div className="report-header">
-                <span className="report-date">{report.date}</span>
-                <span className={`discrepancies-badge ${report.total_discrepancies > 0 ? 'has-discrepancies' : 'no-discrepancies'}`}>
-                  {report.total_discrepancies} discrepancies
-                </span>
-                <span className="report-time">{new Date(report.created_at).toLocaleString()}</span>
+              <div className="report-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+                  <span className="report-date">{report.date}</span>
+                  <span className={`discrepancies-badge ${report.total_discrepancies > 0 ? 'has-discrepancies' : 'no-discrepancies'}`}>
+                    {report.total_discrepancies} discrepancies
+                  </span>
+                  <span className="report-time">{new Date(report.created_at).toLocaleString()}</span>
+                </div>
+                
+                <div style={{ display: 'flex', gap: '10px' }}>
+                  <button
+                    onClick={() => downloadExcelReport(report)}
+                    disabled={downloadingReports.has(report.id)}
+                    style={{
+                      padding: '6px 12px',
+                      backgroundColor: '#28a745',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: '4px',
+                      cursor: downloadingReports.has(report.id) ? 'not-allowed' : 'pointer',
+                      fontSize: '12px',
+                      opacity: downloadingReports.has(report.id) ? 0.6 : 1
+                    }}
+                  >
+                    {downloadingReports.has(report.id) ? '📥 Downloading...' : '📊 Download Excel'}
+                  </button>
+                  
+                  {report.total_discrepancies > 0 && (
+                    <button
+                      onClick={() => toggleReportExpansion(report.id)}
+                      style={{
+                        padding: '6px 12px',
+                        backgroundColor: '#007bff',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '4px',
+                        cursor: 'pointer',
+                        fontSize: '12px'
+                      }}
+                    >
+                      {expandedReports.has(report.id) ? '▼ Hide Details' : '▶ View Details'}
+                    </button>
+                  )}
+                </div>
               </div>
-              
-              {report.total_discrepancies > 0 && (
-                <details className="report-details">
-                  <summary>View Details</summary>
+
+              {report.total_discrepancies > 0 && expandedReports.has(report.id) && (
+                <div className="report-details">
                   <div className="discrepancies-summary">
-                    <table>
+                    <h4>Inventory Discrepancies</h4>
+                    
+                    {renderPagination(report.discrepancies, report.id)}
+                    
+                    <table style={{ width: '100%', borderCollapse: 'collapse', margin: '10px 0' }}>
                       <thead>
-                        <tr>
-                          <th>SKU</th>
-                          <th>Product</th>
-                          <th>Brightpearl</th>
-                          <th>Infoplus</th>
-                          <th>Diff</th>
+                        <tr style={{ backgroundColor: '#f8f9fa' }}>
+                          <th style={{ border: '1px solid #dee2e6', padding: '12px', textAlign: 'left' }}>SKU</th>
+                          <th style={{ border: '1px solid #dee2e6', padding: '12px', textAlign: 'left' }}>Product</th>
+                          <th style={{ border: '1px solid #dee2e6', padding: '12px', textAlign: 'right' }}>Brightpearl</th>
+                          <th style={{ border: '1px solid #dee2e6', padding: '12px', textAlign: 'right' }}>Infoplus</th>
+                          <th style={{ border: '1px solid #dee2e6', padding: '12px', textAlign: 'right' }}>Difference</th>
+                          <th style={{ border: '1px solid #dee2e6', padding: '12px', textAlign: 'right' }}>% Diff</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {report.discrepancies.slice(0, 5).map((item, idx) => (
-                          <tr key={idx}>
-                            <td>{item.sku}</td>
-                            <td>{item.productName || 'N/A'}</td>
-                            <td>{item.brightpearl_stock}</td>
-                            <td>{item.infoplus_stock}</td>
-                            <td style={{color: item.difference < 0 ? 'red' : 'green'}}>
+                        {getPaginatedDiscrepancies(report.discrepancies, report.id).map((item, itemIndex) => (
+                          <tr key={itemIndex} style={{ backgroundColor: itemIndex % 2 === 0 ? 'white' : '#f8f9fa' }}>
+                            <td style={{ border: '1px solid #dee2e6', padding: '10px', fontWeight: 'bold' }}>{item.sku}</td>
+                            <td style={{ border: '1px solid #dee2e6', padding: '10px' }}>{item.productName || 'N/A'}</td>
+                            <td style={{ border: '1px solid #dee2e6', padding: '10px', textAlign: 'right' }}>{item.brightpearl_stock}</td>
+                            <td style={{ border: '1px solid #dee2e6', padding: '10px', textAlign: 'right' }}>{item.infoplus_stock}</td>
+                            <td style={{ 
+                              border: '1px solid #dee2e6', 
+                              padding: '10px', 
+                              textAlign: 'right',
+                              color: item.difference < 0 ? 'red' : 'green',
+                              fontWeight: 'bold'
+                            }}>
                               {item.difference > 0 ? '+' : ''}{item.difference}
+                            </td>
+                            <td style={{ border: '1px solid #dee2e6', padding: '10px', textAlign: 'right' }}>
+                              {item.percentage_diff ? `${item.percentage_diff}%` : 'N/A'}
                             </td>
                           </tr>
                         ))}
                       </tbody>
                     </table>
-                    {report.discrepancies.length > 5 && (
-                      <p><em>Showing 5 of {report.discrepancies.length} discrepancies</em></p>
-                    )}
+                    
+                    {renderPagination(report.discrepancies, report.id)}
                   </div>
-                </details>
+                </div>
               )}
             </div>
           ))}

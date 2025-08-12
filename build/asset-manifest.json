@@ -1,13 +1,13 @@
 {
   "files": {
     "main.css": "/texon-inventory-comparison/static/css/main.6c424b74.css",
-    "main.js": "/texon-inventory-comparison/static/js/main.1732a544.js",
+    "main.js": "/texon-inventory-comparison/static/js/main.86361ee6.js",
     "index.html": "/texon-inventory-comparison/index.html",
     "main.6c424b74.css.map": "/texon-inventory-comparison/static/css/main.6c424b74.css.map",
-    "main.1732a544.js.map": "/texon-inventory-comparison/static/js/main.1732a544.js.map"
+    "main.86361ee6.js.map": "/texon-inventory-comparison/static/js/main.86361ee6.js.map"
   },
   "entrypoints": [
     "static/css/main.6c424b74.css",
-    "static/js/main.1732a544.js"
+    "static/js/main.86361ee6.js"
   ]
 }

@@ -345,6 +345,8 @@ class BrightpearlAPI {
         }
     }
 
+    // Replace the getInventoryLevels method in your BrightpearlAPI class with this CORRECTED version:
+    
     async getInventoryLevels(productIds) {
         try {
             console.log('📦 Fetching Brightpearl inventory levels...');
@@ -362,27 +364,56 @@ class BrightpearlAPI {
                 try {
                     const inventoryData = await this.makeRequest(`warehouse-service/product-availability/${idRange}`);
                     
-                    if (inventoryData && inventoryData.results) {
-                        Object.entries(inventoryData.results).forEach(([productId, productInventory]) => {
+                    // IMPORTANT: The response is NOT wrapped in .results - it's the direct data
+                    if (inventoryData && typeof inventoryData === 'object') {
+                        console.log(`✅ Got inventory data for ${Object.keys(inventoryData).length} products in batch`);
+                        
+                        Object.entries(inventoryData).forEach(([productId, productInventory]) => {
                             let totalAvailable = 0;
                             
-                            // Sum across all warehouses
-                            if (typeof productInventory === 'object') {
-                                Object.values(productInventory).forEach(warehouseStock => {
-                                    if (typeof warehouseStock === 'object' && warehouseStock.availableStock !== undefined) {
-                                        totalAvailable += warehouseStock.availableStock || 0;
+                            // Based on debug output, the structure is:
+                            // { "productId": { "total": { "inStock": 183, "onHand": 183, ... }, "warehouses": {...} } }
+                            
+                            if (productInventory && typeof productInventory === 'object') {
+                                if (productInventory.total && typeof productInventory.total === 'object') {
+                                    // Use inStock as the primary available quantity
+                                    totalAvailable = productInventory.total.inStock || 0;
+                                    
+                                    // Debug first few items
+                                    if (Object.keys(inventory).length < 5) {
+                                        console.log(`🔍 Product ${productId}: inStock=${productInventory.total.inStock}, onHand=${productInventory.total.onHand}, allocated=${productInventory.total.allocated}`);
                                     }
-                                });
+                                } else {
+                                    // Fallback: if no total object, try to sum warehouse data
+                                    if (productInventory.warehouses && typeof productInventory.warehouses === 'object') {
+                                        Object.values(productInventory.warehouses).forEach(warehouseStock => {
+                                            if (typeof warehouseStock === 'object' && warehouseStock.inStock !== undefined) {
+                                                totalAvailable += warehouseStock.inStock || 0;
+                                            }
+                                        });
+                                    }
+                                }
                             }
                             
                             inventory[productId] = {
                                 available: totalAvailable
                             };
+                            
+                            // Log some sample results for verification
+                            if (Object.keys(inventory).length <= 3) {
+                                console.log(`📊 Product ${productId} final available: ${totalAvailable}`);
+                            }
                         });
+                    } else {
+                        console.warn(`⚠️ No inventory data in response for batch ${Math.floor(i/batchSize) + 1}`);
+                        console.warn(`⚠️ Response type: ${typeof inventoryData}, Keys: ${inventoryData ? Object.keys(inventoryData) : 'none'}`);
                     }
                 } catch (batchError) {
                     console.warn(`⚠️ Failed to fetch inventory for batch ${Math.floor(i/batchSize) + 1}: ${batchError.message}`);
-                    // Continue with next batch
+                    // Set zero inventory for this batch to continue processing
+                    batch.forEach(productId => {
+                        inventory[productId] = { available: 0 };
+                    });
                 }
                 
                 // Rate limiting delay
@@ -392,6 +423,21 @@ class BrightpearlAPI {
             }
             
             console.log(`✅ Processed inventory for ${Object.keys(inventory).length} products`);
+            
+            // Show statistics for verification
+            const inventoryValues = Object.values(inventory).map(inv => inv.available);
+            const totalStock = inventoryValues.reduce((sum, stock) => sum + stock, 0);
+            const itemsWithStock = inventoryValues.filter(stock => stock > 0).length;
+            
+            console.log(`📊 Brightpearl inventory summary:`);
+            console.log(`   - Items processed: ${Object.keys(inventory).length}`);
+            console.log(`   - Items with stock > 0: ${itemsWithStock}`);
+            console.log(`   - Total stock: ${totalStock}`);
+            
+            // Show some sample final values
+            const sampleEntries = Object.entries(inventory).slice(0, 5);
+            console.log(`📦 Sample final inventory:`, sampleEntries.map(([id, data]) => `${id}:${data.available}`).join(', '));
+            
             return inventory;
             
         } catch (error) {
@@ -464,25 +510,182 @@ class BrightpearlAPI {
             };
         }
     }
+    
+    // Replace the debugCurrentInventoryStructure method in your BrightpearlAPI class with this corrected version:
+    
+    async debugCurrentInventoryStructure() {
+        try {
+            console.log('🔍 Debugging current Brightpearl inventory structure...');
+            
+            // Get test products using the same method as your main code
+            const productData = await this.makeRequest('product-service/product-search?pageSize=5&filter=stockTracked eq true');
+            
+            if (!productData || !productData.results || productData.results.length === 0) {
+                console.log('❌ No products found for testing');
+                return null;
+            }
+            
+            console.log(`🧪 Found ${productData.results.length} test products`);
+            
+            // Show the raw structure of the first few products
+            console.log('📊 Raw product data structure:');
+            productData.results.slice(0, 3).forEach((product, index) => {
+                console.log(`Product ${index + 1} (raw array):`, product);
+                
+                // Based on your getProducts method, extract the data correctly
+                const productIdIndex = 0;    // productId
+                const productNameIndex = 1;  // productName  
+                const skuIndex = 2;          // SKU
+                const stockTrackedIndex = 8; // stockTracked
+                
+                const productId = product[productIdIndex];
+                const productName = product[productNameIndex];
+                const sku = product[skuIndex];
+                const stockTracked = product[stockTrackedIndex];
+                
+                console.log(`📦 Parsed Product ${index + 1}:`);
+                console.log(`   - ID: ${productId}`);
+                console.log(`   - Name: ${productName}`);
+                console.log(`   - SKU: ${sku}`);
+                console.log(`   - Stock Tracked: ${stockTracked}`);
+            });
+            
+            // Test inventory endpoints with the first valid product
+            for (let i = 0; i < Math.min(3, productData.results.length); i++) {
+                const product = productData.results[i];
+                const productId = product[0]; // productId is at index 0
+                const sku = product[2];       // SKU is at index 2
+                
+                // Skip if productId is undefined or null
+                if (!productId) {
+                    console.log(`⚠️ Skipping product ${i + 1} - no valid product ID`);
+                    continue;
+                }
+                
+                console.log(`\n🔍 === Testing Product ID: ${productId}, SKU: ${sku} ===`);
+                
+                // Test warehouse-service endpoint
+                try {
+                    const inventoryData = await this.makeRequest(`warehouse-service/product-availability/${productId}`);
+                    console.log('📦 Raw warehouse-service response:');
+                    console.log(JSON.stringify(inventoryData, null, 2));
+                    
+                    // Show how your current code would parse this
+                    if (inventoryData && inventoryData.results) {
+                        const productInventory = inventoryData.results[productId];
+                        console.log(`🔍 Product inventory data:`, productInventory);
+                        
+                        if (typeof productInventory === 'object') {
+                            let totalAvailable = 0;
+                            Object.values(productInventory).forEach(warehouseStock => {
+                                if (typeof warehouseStock === 'object' && warehouseStock.availableStock !== undefined) {
+                                    console.log(`   - Warehouse stock:`, warehouseStock);
+                                    totalAvailable += warehouseStock.availableStock || 0;
+                                }
+                            });
+                            console.log(`🔍 Calculated total available: ${totalAvailable}`);
+                        }
+                    }
+                } catch (error) {
+                    console.log(`❌ warehouse-service failed for ${productId}:`, error.message);
+                }
+                
+                // Test alternative endpoints
+                try {
+                    const altData = await this.makeRequest(`product-service/product/${productId}/availability`);
+                    console.log('📊 Raw product-service/availability response:');
+                    console.log(JSON.stringify(altData, null, 2));
+                } catch (error) {
+                    console.log(`❌ product-service/availability failed for ${productId}:`, error.message);
+                }
+            }
+            
+            // Search for the specific SKUs more thoroughly
+            console.log('\n🎯 Searching for specific target SKUs...');
+            const targetSkus = ['ZIP1519BLK', 'ZIP1519GREY', 'LB1519WCID'];
+            
+            // Search through more products to find the target SKUs
+            for (let page = 1; page <= 5; page++) {
+                const firstResult = (page - 1) * 100 + 1;
+                console.log(`🔍 Searching page ${page} for target SKUs...`);
+                
+                try {
+                    const searchData = await this.makeRequest(`product-service/product-search?pageSize=100&firstResult=${firstResult}&filter=stockTracked eq true`);
+                    
+                    if (searchData && searchData.results) {
+                        for (const product of searchData.results) {
+                            const productId = product[0];
+                            const sku = product[2];
+                            
+                            if (targetSkus.includes(sku)) {
+                                console.log(`\n🎯 FOUND TARGET SKU: ${sku} - Product ID: ${productId}`);
+                                
+                                // Test inventory for this specific SKU
+                                try {
+                                    const inventoryData = await this.makeRequest(`warehouse-service/product-availability/${productId}`);
+                                    console.log(`📦 Inventory data for ${sku}:`, JSON.stringify(inventoryData, null, 2));
+                                    
+                                    // Parse the inventory data
+                                    if (inventoryData && inventoryData.results && inventoryData.results[productId]) {
+                                        const productInventory = inventoryData.results[productId];
+                                        let totalAvailable = 0;
+                                        
+                                        if (typeof productInventory === 'object') {
+                                            Object.values(productInventory).forEach(warehouseStock => {
+                                                if (typeof warehouseStock === 'object' && warehouseStock.availableStock !== undefined) {
+                                                    totalAvailable += warehouseStock.availableStock || 0;
+                                                }
+                                            });
+                                        }
+                                        
+                                        console.log(`🔍 ${sku} calculated stock: ${totalAvailable}`);
+                                        
+                                        if (totalAvailable === 0) {
+                                            console.log(`⚠️ ${sku} shows 0 stock - this explains the issue!`);
+                                            console.log(`🔍 Raw inventory structure:`, JSON.stringify(productInventory, null, 2));
+                                        }
+                                    }
+                                } catch (error) {
+                                    console.log(`❌ Failed to get inventory for ${sku}:`, error.message);
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Add delay between pages to avoid rate limiting
+                    if (page < 5) {
+                        await new Promise(resolve => setTimeout(resolve, 300));
+                    }
+                } catch (error) {
+                    console.log(`❌ Search page ${page} failed:`, error.message);
+                    break;
+                }
+            }
+            
+            return true;
+            
+        } catch (error) {
+            console.error('❌ Debug failed:', error);
+            return false;
+        }
+    }
 }
 
-// Corrected InfoplusAPI Class - Replace in your server.js
+// Replace the InfoplusAPI class with this corrected version using proper pagination:
 
 class InfoplusAPI {
     constructor() {
-        // CORRECT: Use the proper Infoplus domain format
-        this.companyId = process.env.INFOPLUS_COMPANY_ID || 'texon'; // Your company identifier
+        this.companyId = process.env.INFOPLUS_COMPANY_ID || 'texon';
         this.baseUrl = `https://${this.companyId}.infopluswms.com/infoplus-wms/api`;
         this.apiKey = process.env.INFOPLUS_API_KEY;
-        this.lobId = process.env.INFOPLUS_LOB_ID || 1;
-        this.version = 'beta'; // Use beta version for full access
+        this.lobId = process.env.INFOPLUS_LOB_ID || 19693;
+        this.version = 'beta';
         
         console.log('🔧 Infoplus API Configuration:');
         console.log(`Base URL: ${this.baseUrl}`);
         console.log(`Company ID: ${this.companyId}`);
         console.log(`LOB ID: ${this.lobId}`);
         console.log(`API Key: ${this.apiKey ? '✅ Set' : '❌ Missing'}`);
-        console.log(`Version: ${this.version}`);
     }
 
     async makeRequest(endpoint, options = {}) {
@@ -508,7 +711,7 @@ class InfoplusAPI {
             }
 
             const data = await response.json();
-            console.log(`✅ Infoplus request successful`);
+            console.log(`✅ Infoplus request successful - returned ${Array.isArray(data) ? data.length : 'non-array'} items`);
             return data;
             
         } catch (error) {
@@ -517,66 +720,170 @@ class InfoplusAPI {
         }
     }
 
-    // Replace the getInventory method in your InfoplusAPI class with this optimized version:
-    
     async getInventory() {
         try {
-            console.log('📊 Fetching Infoplus inventory...');
+            console.log('📊 Fetching Infoplus inventory using correct pagination (page parameter)...');
             
-            // Instead of fetching ALL inventory details, let's try the item endpoint first
-            // which should give us current quantities more efficiently
             let allItems = [];
-            let page = 1;
-            const limit = 250;
+            let page = 1; // Start with page 1 (not 0)
+            const limit = 250; // Items per page
             let hasMore = true;
+            const maxPages = 100; // Safety limit to prevent infinite loops
             
-            while (hasMore && page <= 20) { // Limit to 20 pages (5000 items) to start
+            while (hasMore && page <= maxPages) {
                 console.log(`📦 Fetching Infoplus items page ${page}...`);
                 
-                const offset = (page - 1) * limit;
+                // Use correct pagination parameters: limit and page
                 const searchParams = new URLSearchParams({
                     limit: limit,
-                    offset: offset,
-                    filter: `lobId eq ${this.lobId}` // Filter by Line of Business
+                    page: page // This is the key change - using 'page' instead of 'offset'
+                    // No filters to avoid the parsing errors
                 });
                 
-                const itemData = await this.makeRequest(
-                    `item/search?${searchParams.toString()}`
-                );
-                
-                if (itemData && itemData.length > 0) {
-                    allItems = allItems.concat(itemData);
+                try {
+                    const itemData = await this.makeRequest(
+                        `item/search?${searchParams.toString()}`
+                    );
                     
-                    hasMore = itemData.length === limit;
-                    console.log(`✅ Page ${page}: ${itemData.length} items (Total so far: ${allItems.length})`);
-                    page++;
-                    
-                    // Rate limiting
-                    if (hasMore) {
-                        await new Promise(resolve => setTimeout(resolve, 200));
+                    if (itemData && itemData.length > 0) {
+                        // Filter by LOB locally after fetching to avoid filter parsing issues
+                        const lobFilteredItems = itemData.filter(item => 
+                            item.lobId === this.lobId || item.lobId === parseInt(this.lobId)
+                        );
+                        
+                        allItems = allItems.concat(lobFilteredItems);
+                        
+                        // Check if we should continue - if we got fewer items than requested, we're done
+                        hasMore = itemData.length === limit;
+                        
+                        console.log(`✅ Page ${page}: ${itemData.length} total items, ${lobFilteredItems.length} for LOB ${this.lobId} (Running total: ${allItems.length})`);
+                        
+                        // Show first few item IDs to verify pagination is working
+                        if (itemData.length > 0) {
+                            const firstFewIds = itemData.slice(0, 3).map(item => item.id);
+                            console.log(`   📋 Item IDs on this page: ${firstFewIds.join(', ')}...`);
+                        }
+                        
+                        page++;
+                        
+                        // Rate limiting to be nice to the API
+                        if (hasMore) {
+                            await new Promise(resolve => setTimeout(resolve, 300));
+                        }
+                    } else {
+                        console.log(`📋 Page ${page}: No items returned - end of data`);
+                        hasMore = false;
                     }
-                } else {
-                    hasMore = false;
+                } catch (error) {
+                    console.error(`❌ Failed to fetch page ${page}:`, error.message);
+                    // Don't stop entirely - try next page in case it was a temporary error
+                    if (error.message.includes('filter')) {
+                        // If it's a filter error, stop trying
+                        hasMore = false;
+                    } else {
+                        page++;
+                        if (page > maxPages) hasMore = false;
+                    }
                 }
             }
             
-            console.log(`✅ Found ${allItems.length} Infoplus items`);
+            console.log(`✅ Pagination complete: ${allItems.length} total items from ${page - 1} pages`);
             
-            // Convert items to inventory format
+            // Verify no duplicates by checking unique IDs
+            const uniqueIds = new Set(allItems.map(item => item.id));
+            console.log(`🔍 Uniqueness check: ${allItems.length} records, ${uniqueIds.size} unique IDs`);
+            
+            if (allItems.length !== uniqueIds.size) {
+                console.warn(`⚠️ Found ${allItems.length - uniqueIds.size} duplicate records - deduplicating...`);
+                
+                // Deduplicate by ID
+                const seenIds = new Set();
+                allItems = allItems.filter(item => {
+                    if (seenIds.has(item.id)) {
+                        return false;
+                    }
+                    seenIds.add(item.id);
+                    return true;
+                });
+                
+                console.log(`✅ After deduplication: ${allItems.length} unique items`);
+            }
+            
+            // Process items into inventory format
             const inventory = {};
-            allItems.forEach(item => {
+            let validSkuCount = 0;
+            let invalidSkuCount = 0;
+            let zeroQuantityCount = 0;
+            let positiveQuantityCount = 0;
+            
+            allItems.forEach((item, index) => {
                 const sku = item.sku;
                 
-                if (sku) {
-                    inventory[sku] = {
-                        sku: sku,
-                        productName: item.itemDescription || item.itemShortDescription || 'Unknown Product',
-                        quantity: item.availableQuantity || item.quantityOnHand || 0
-                    };
+                // Skip records without valid SKUs
+                if (!sku || sku.trim() === '') {
+                    invalidSkuCount++;
+                    return;
+                }
+                
+                const cleanSku = sku.trim();
+                const quantity = this.parseQuantity(item.availableQuantity);
+                const description = item.itemDescription || 'Unknown Product';
+                
+                // Track quantity statistics
+                if (quantity === 0) {
+                    zeroQuantityCount++;
+                } else {
+                    positiveQuantityCount++;
+                }
+                
+                inventory[cleanSku] = {
+                    sku: cleanSku,
+                    productName: description,
+                    quantity: quantity
+                };
+                
+                validSkuCount++;
+                
+                // Debug first few items to verify data structure
+                if (index < 5) {
+                    console.log(`🔍 Item ${index + 1}: ID=${item.id}, SKU="${sku}", LOB=${item.lobId}, AvailableQty=${item.availableQuantity}`);
                 }
             });
             
-            console.log(`✅ Processed ${Object.keys(inventory).length} unique Infoplus SKUs`);
+            console.log(`📊 Processing complete:`);
+            console.log(`   - Total items processed: ${allItems.length}`);
+            console.log(`   - Valid SKUs: ${validSkuCount}`);
+            console.log(`   - Invalid/missing SKUs: ${invalidSkuCount}`);
+            console.log(`   - SKUs with zero quantity: ${zeroQuantityCount}`);
+            console.log(`   - SKUs with positive quantity: ${positiveQuantityCount}`);
+            console.log(`   - Final unique SKUs: ${Object.keys(inventory).length}`);
+            
+            // Show sample of final inventory
+            const sampleSkus = Object.keys(inventory).slice(0, 10);
+            console.log('📦 Sample final Infoplus SKUs:', sampleSkus);
+            
+            // Show some statistics
+            const quantities = Object.values(inventory).map(item => item.quantity);
+            const totalQuantity = quantities.reduce((sum, qty) => sum + qty, 0);
+            const nonZeroItems = quantities.filter(qty => qty > 0).length;
+            
+            console.log(`📊 Final inventory statistics:`);
+            console.log(`   - Total quantity across all SKUs: ${totalQuantity}`);
+            console.log(`   - SKUs with stock > 0: ${nonZeroItems}`);
+            console.log(`   - SKUs with zero stock: ${Object.keys(inventory).length - nonZeroItems}`);
+            
+            // Check for specific test SKUs
+            const testSkus = ['ZIP1519BLK', 'ZIP1519GREY', 'LB1519WCID', '092010S-3-GREY', '092010S-4-GREY'];
+            console.log(`🎯 Looking for test SKUs:`);
+            testSkus.forEach(testSku => {
+                if (inventory[testSku]) {
+                    console.log(`   ✅ ${testSku}: ${inventory[testSku].quantity} units`);
+                } else {
+                    console.log(`   ❌ ${testSku}: not found`);
+                }
+            });
+            
+            console.log(`✅ Successfully processed ${Object.keys(inventory).length} unique Infoplus SKUs`);
             return inventory;
             
         } catch (error) {
@@ -585,17 +892,34 @@ class InfoplusAPI {
         }
     }
 
+    // Helper method to safely parse quantity values
+    parseQuantity(value) {
+        if (value === null || value === undefined || value === '') {
+            return 0;
+        }
+        
+        const parsed = parseFloat(value);
+        return isNaN(parsed) ? 0 : Math.max(0, parsed); // Ensure non-negative
+    }
+
     async testConnection() {
         try {
             console.log('🧪 Testing Infoplus connection...');
             
-            // Test with a simple warehouse lookup
-            const testData = await this.makeRequest(`warehouse/search?limit=1`);
+            // Test with correct pagination parameters
+            const testData = await this.makeRequest(`item/search?limit=5&page=1`);
             
             if (testData && Array.isArray(testData)) {
+                console.log(`✅ Test successful - received ${testData.length} items`);
+                
+                if (testData.length > 0) {
+                    const testItem = testData[0];
+                    console.log(`📦 Sample item: ID=${testItem.id}, SKU="${testItem.sku}", LOB=${testItem.lobId}, Available=${testItem.availableQuantity}`);
+                }
+                
                 return { 
                     success: true, 
-                    message: `Infoplus connection successful! Found ${testData.length > 0 ? 'warehouses' : 'empty warehouse list'}.` 
+                    message: `Infoplus connection successful! Test returned ${testData.length} items.` 
                 };
             } else {
                 return { 
@@ -620,16 +944,128 @@ class InfoplusAPI {
             };
         }
     }
+
+    // Test method to verify pagination is working correctly
+    async testPagination() {
+        try {
+            console.log('🔍 Testing Infoplus pagination...');
+            
+            // Get first page
+            const page1 = await this.makeRequest(`item/search?limit=5&page=1`);
+            console.log('Page 1 first item ID:', page1[0]?.id);
+            console.log('Page 1 last item ID:', page1[page1.length - 1]?.id);
+            
+            // Get second page
+            const page2 = await this.makeRequest(`item/search?limit=5&page=2`);
+            console.log('Page 2 first item ID:', page2[0]?.id);
+            console.log('Page 2 last item ID:', page2[page2.length - 1]?.id);
+            
+            // Check if pagination is working
+            const page1Ids = new Set(page1.map(item => item.id));
+            const page2Ids = new Set(page2.map(item => item.id));
+            const hasOverlap = [...page1Ids].some(id => page2Ids.has(id));
+            
+            if (hasOverlap) {
+                console.log('❌ PAGINATION ISSUE - Found overlapping IDs between pages');
+                return false;
+            } else {
+                console.log('✅ Pagination working correctly - no overlapping IDs');
+                return true;
+            }
+            
+        } catch (error) {
+            console.error('❌ Pagination test failed:', error);
+            return false;
+        }
+    }
 }
 
 // Initialize API clients
 const brightpearlAPI = new BrightpearlAPI();
 const infoplusAPI = new InfoplusAPI();
 
-// Real inventory comparison function
+// Add this SKU normalization function to your server.js file (before the performRealInventoryComparison function):
+
+function normalizeSku(sku) {
+    if (!sku || typeof sku !== 'string') {
+        return '';
+    }
+    
+    return sku
+        .toLowerCase()           // Convert to lowercase (main difference)
+        .trim();                 // Remove leading/trailing whitespace
+    
+    // Keep all separators (-_) and other characters intact
+    // This will handle: "2XL-407-SINGLE" ↔ "2xl-407-SINGLE" 
+    // But preserve: "QB-TOWELS" vs "QBTowels" as different SKUs
+}
+
+// Add this SKU normalization function to your server.js file (before the performRealInventoryComparison function):
+
+function normalizeSku(sku) {
+    if (!sku || typeof sku !== 'string') {
+        return '';
+    }
+    
+    return sku
+        .toLowerCase()           // Convert to lowercase for case-insensitive matching
+        .trim();                 // Remove leading/trailing whitespace
+}
+
+// Additional function for "loose" matching that removes separators
+function normalizeSkuLoose(sku) {
+    if (!sku || typeof sku !== 'string') {
+        return '';
+    }
+    
+    return sku
+        .toLowerCase()           // Convert to lowercase
+        .replace(/[-_\s]/g, '')  // Remove hyphens, underscores, and spaces
+        .replace(/[^a-z0-9]/g, '') // Remove any other special characters
+        .trim();
+}
+
+// Helper function to create SKU mapping with both strict and loose normalization
+function createNormalizedSkuMap(inventory) {
+    const strictMap = new Map();  // Case-insensitive only: "2XL-407-SINGLE" ↔ "2xl-407-SINGLE"
+    const looseMap = new Map();   // Also removes separators: "QB-TOWELS" ↔ "QBTowels"
+    const skuMap = new Map();     // Maps normalized SKU back to original SKU
+    
+    Object.entries(inventory).forEach(([originalSku, data]) => {
+        const strictNormalized = normalizeSku(originalSku);
+        const looseNormalized = normalizeSkuLoose(originalSku);
+        
+        if (strictNormalized && strictNormalized.length > 0) {
+            // Store in strict map (preserves separators)
+            if (!strictMap.has(strictNormalized)) {
+                strictMap.set(strictNormalized, {
+                    ...data,
+                    originalSku: originalSku,
+                    matchType: 'strict'
+                });
+                skuMap.set(strictNormalized, originalSku);
+            }
+            
+            // Also store in loose map (removes separators) if different from strict
+            if (looseNormalized !== strictNormalized && !looseMap.has(looseNormalized)) {
+                looseMap.set(looseNormalized, {
+                    ...data,
+                    originalSku: originalSku,
+                    matchType: 'loose'
+                });
+                skuMap.set(looseNormalized, originalSku);
+            }
+        }
+    });
+    
+    return { strictMap, looseMap, skuMap };
+}
+
+// Replace your performRealInventoryComparison function with this enhanced version:
+
 async function performRealInventoryComparison() {
     try {
-        console.log('🔄 Starting REAL inventory comparison...');
+        console.log('🔄 Starting REAL inventory comparison with SKU normalization...');
         
         // Fetch inventory from both systems in parallel
         console.log('📊 Fetching inventory from both systems...');
@@ -641,179 +1077,199 @@ async function performRealInventoryComparison() {
         console.log(`📊 Brightpearl items: ${Object.keys(brightpearlInventory).length}`);
         console.log(`📊 Infoplus items: ${Object.keys(infoplusInventory).length}`);
         
-        // Add this debugging code to your performRealInventoryComparison function
-        // Insert this right after fetching both inventories:
+        // Create normalized SKU maps for both systems
+        console.log('🔄 Normalizing SKUs for better matching...');
         
-        console.log('🔍 SKU Analysis Debug:');
+        const brightpearlNormalized = createNormalizedSkuMap(brightpearlInventory);
+        const infoplusNormalized = createNormalizedSkuMap(infoplusInventory);
         
-        // Sample Brightpearl SKUs
-        const brightpearlSkus = Object.keys(brightpearlInventory).slice(0, 10);
-        console.log('📊 Sample Brightpearl SKUs:', brightpearlSkus);
+        console.log(`📊 After normalization:`);
+        console.log(`   - Brightpearl: ${Object.keys(brightpearlInventory).length} original SKUs`);
+        console.log(`     → ${brightpearlNormalized.strictMap.size} strict normalized, ${brightpearlNormalized.looseMap.size} loose normalized`);
+        console.log(`   - Infoplus: ${Object.keys(infoplusInventory).length} original SKUs`);
+        console.log(`     → ${infoplusNormalized.strictMap.size} strict normalized, ${infoplusNormalized.looseMap.size} loose normalized`);
         
-        // Sample Infoplus SKUs  
-        const infoplusSkus = Object.keys(infoplusInventory).slice(0, 10);
-        console.log('📦 Sample Infoplus SKUs:', infoplusSkus);
-        
-        // Check for exact matches
-        const exactMatches = brightpearlSkus.filter(sku => infoplusInventory[sku]);
-        console.log('✅ Exact SKU matches found:', exactMatches.length);
-        
-        // Check for case-insensitive matches
-        const brightpearlSkusLower = Object.keys(brightpearlInventory).map(sku => sku.toLowerCase());
-        const infoplusSkusLower = Object.keys(infoplusInventory).map(sku => sku.toLowerCase());
-        const caseInsensitiveMatches = brightpearlSkusLower.filter(sku => infoplusSkusLower.includes(sku));
-        console.log('🔤 Case-insensitive matches:', caseInsensitiveMatches.length);
-        
-        // Check for partial matches (substring matching)
-        let partialMatches = 0;
-        brightpearlSkus.forEach(bpSku => {
-            infoplusSkus.forEach(ipSku => {
-                if (bpSku.includes(ipSku) || ipSku.includes(bpSku)) {
-                    partialMatches++;
-                    console.log(`🔗 Partial match: "${bpSku}" ↔ "${ipSku}"`);
-                }
-            });
-        });
-        console.log(`🔗 Partial matches found: ${partialMatches}`);
-        
-        // Show sample inventory data structures
-        if (brightpearlSkus.length > 0) {
-            const sampleBpItem = brightpearlInventory[brightpearlSkus[0]];
-            console.log('📊 Sample Brightpearl item:', JSON.stringify(sampleBpItem, null, 2));
-        }
-        
-        if (infoplusSkus.length > 0) {
-            const sampleIpItem = infoplusInventory[infoplusSkus[0]];
-            console.log('📦 Sample Infoplus item:', JSON.stringify(sampleIpItem, null, 2));
-        }
-        
-        // Add this enhanced debugging after the SKU analysis in performRealInventoryComparison:
-        
-        console.log('🔍 Enhanced SKU Analysis:');
-        
-        // Check Brightpearl SKU patterns  
-        const allBrightpearlSkus = Object.keys(brightpearlInventory);
-        const bpNumericSkus = allBrightpearlSkus.filter(sku => /^\d+$/.test(sku));
-        const bpAlphanumericSkus = allBrightpearlSkus.filter(sku => /^[A-Za-z0-9-]+$/.test(sku) && !/^\d+$/.test(sku));
-        
-        console.log(`📊 Brightpearl SKU patterns:`);
-        console.log(`  - Numeric only: ${bpNumericSkus.length} (e.g., ${bpNumericSkus.slice(0, 3).join(', ')})`);
-        console.log(`  - Alphanumeric: ${bpAlphanumericSkus.length} (e.g., ${bpAlphanumericSkus.slice(0, 3).join(', ')})`);
-        
-        // Check Infoplus SKU patterns
-        const allInfoplusSkus = Object.keys(infoplusInventory);
-        const ipNumericSkus = allInfoplusSkus.filter(sku => /^\d+$/.test(sku));
-        const ipAlphanumericSkus = allInfoplusSkus.filter(sku => /^[A-Za-z0-9-]+$/.test(sku));
-        
-        console.log(`📦 Infoplus SKU patterns:`);
-        console.log(`  - Numeric only: ${ipNumericSkus.length} (e.g., ${ipNumericSkus.slice(0, 3).join(', ')})`);
-        console.log(`  - Alphanumeric: ${ipAlphanumericSkus.length} (e.g., ${ipAlphanumericSkus.slice(0, 3).join(', ')})`);
-        
-        // Find actual matches
-        const realExactMatches = [];
-        const realCaseMatches = [];
-        
-        allBrightpearlSkus.forEach(bpSku => {
-            if (infoplusInventory[bpSku]) {
-                realExactMatches.push(bpSku);
-            } else if (infoplusInventory[bpSku.toLowerCase()] || infoplusInventory[bpSku.toUpperCase()]) {
-                realCaseMatches.push(bpSku);
-            }
-        });
-        
-        console.log(`🎯 Actual SKU matches:`);
-        console.log(`  - Exact matches: ${realExactMatches.length} (e.g., ${realExactMatches.slice(0, 5).join(', ')})`);
-        console.log(`  - Case insensitive: ${realCaseMatches.length} (e.g., ${realCaseMatches.slice(0, 5).join(', ')})`);
-        
-        // Show some sample matched pairs
-        if (realExactMatches.length > 0) {
-            console.log(`🔗 Sample exact matches:`);
-            realExactMatches.slice(0, 3).forEach(sku => {
-                const bpQty = brightpearlInventory[sku]?.quantity || 0;
-                const ipQty = infoplusInventory[sku]?.quantity || 0;
-                console.log(`  "${sku}": BP=${bpQty}, IP=${ipQty}, Diff=${bpQty - ipQty}`);
-            });
-        }
-        
-        // Check if Brightpearl SKUs look suspiciously like product IDs
-        const avgBpSkuLength = allBrightpearlSkus.reduce((sum, sku) => sum + sku.length, 0) / allBrightpearlSkus.length;
-        const allBpNumeric = allBrightpearlSkus.every(sku => /^\d+$/.test(sku));
-        
-        console.log(`⚠️ Brightpearl SKU Analysis:`);
-        console.log(`  - Average length: ${avgBpSkuLength.toFixed(1)} characters`);
-        console.log(`  - All numeric: ${allBpNumeric}`);
-        
-        if (allBpNumeric && avgBpSkuLength < 6) {
-            console.log(`🚨 WARNING: Brightpearl SKUs look like product IDs, not actual SKUs!`);
-            console.log(`   - Expected SKUs: alphanumeric codes like "TOWEL-001", "RACK-HD-48"`);
-            console.log(`   - Current SKUs: simple numbers like "656", "692", "12003"`);
-            console.log(`   - This suggests we might be using the wrong field from Brightpearl`);
-        }
-
-        // Compare inventories
+        // Find matches using a two-tier approach: strict first, then loose
+        const processedSkus = new Set();
+        const exactMatches = [];
+        const brightpearlOnlySkus = [];
+        const infoplusOnlySkus = [];
         const discrepancies = [];
-        const allSkus = new Set([
-            ...Object.keys(brightpearlInventory),
-            ...Object.keys(infoplusInventory)
-        ]);
-
-        console.log(`🔍 Analyzing ${allSkus.size} unique SKUs...`);
-
-        allSkus.forEach(sku => {
-            const brightpearlItem = brightpearlInventory[sku];
-            const infoplusItem = infoplusInventory[sku];
-
+        
+        // Function to process a match
+        const processMatch = (brightpearlItem, infoplusItem, matchType, normalizedSku) => {
             const brightpearlStock = brightpearlItem?.quantity || 0;
             const infoplusStock = infoplusItem?.quantity || 0;
             const difference = brightpearlStock - infoplusStock;
+            
+            const displaySku = brightpearlItem?.originalSku || infoplusItem?.originalSku || normalizedSku;
+            const productName = brightpearlItem?.productName || infoplusItem?.productName || 'Unknown Product';
+            
+            // Mark both original SKUs as processed
+            if (brightpearlItem) processedSkus.add(brightpearlItem.originalSku);
+            if (infoplusItem) processedSkus.add(infoplusItem.originalSku);
+            
+            if (brightpearlItem && infoplusItem) {
+                if (difference === 0) {
+                    exactMatches.push({
+                        normalizedSku,
+                        displaySku,
+                        brightpearlSku: brightpearlItem.originalSku,
+                        infoplusSku: infoplusItem.originalSku,
+                        quantity: brightpearlStock,
+                        matchType
+                    });
+                } else {
+                    const percentageDiff = infoplusStock > 0 
+                        ? Math.round((Math.abs(difference) / infoplusStock) * 100 * 10) / 10 
+                        : 100;
 
-            // Only report discrepancies (not exact matches)
-            if (difference !== 0) {
-                const percentageDiff = infoplusStock > 0 
-                    ? Math.round((Math.abs(difference) / infoplusStock) * 100 * 10) / 10 
-                    : 100;
-
-                discrepancies.push({
-                    sku,
-                    productName: brightpearlItem?.productName || infoplusItem?.productName || 'Unknown Product',
-                    brightpearl_stock: brightpearlStock,
-                    infoplus_stock: infoplusStock,
-                    difference,
-                    percentage_diff: percentageDiff,
-                    brand: brightpearlItem?.brand || 'Unknown'
+                    discrepancies.push({
+                        sku: displaySku,
+                        normalizedSku: normalizedSku,
+                        productName: productName,
+                        brightpearl_stock: brightpearlStock,
+                        infoplus_stock: infoplusStock,
+                        difference,
+                        percentage_diff: percentageDiff,
+                        brand: brightpearlItem?.brand || 'Unknown',
+                        brightpearlSku: brightpearlItem?.originalSku,
+                        infoplusSku: infoplusItem?.originalSku,
+                        matchType
+                    });
+                }
+            }
+        };
+        
+        // First pass: Strict matching (case-insensitive, preserves separators)
+        console.log('🔍 Phase 1: Strict matching (case-insensitive only)...');
+        const allStrictSkus = new Set([
+            ...brightpearlNormalized.strictMap.keys(),
+            ...infoplusNormalized.strictMap.keys()
+        ]);
+        
+        let strictMatches = 0;
+        allStrictSkus.forEach(strictSku => {
+            const brightpearlItem = brightpearlNormalized.strictMap.get(strictSku);
+            const infoplusItem = infoplusNormalized.strictMap.get(strictSku);
+            
+            if (brightpearlItem && infoplusItem) {
+                processMatch(brightpearlItem, infoplusItem, 'strict', strictSku);
+                strictMatches++;
+            }
+        });
+        
+        // Second pass: Loose matching (removes separators) for unmatched SKUs only
+        console.log('🔍 Phase 2: Loose matching (removes separators) for remaining SKUs...');
+        const allLooseSkus = new Set([
+            ...brightpearlNormalized.looseMap.keys(),
+            ...infoplusNormalized.looseMap.keys()
+        ]);
+        
+        let looseMatches = 0;
+        allLooseSkus.forEach(looseSku => {
+            const brightpearlItem = brightpearlNormalized.looseMap.get(looseSku);
+            const infoplusItem = infoplusNormalized.looseMap.get(looseSku);
+            
+            // Only process if both original SKUs haven't been matched yet
+            if (brightpearlItem && infoplusItem && 
+                !processedSkus.has(brightpearlItem.originalSku) && 
+                !processedSkus.has(infoplusItem.originalSku)) {
+                processMatch(brightpearlItem, infoplusItem, 'loose', looseSku);
+                looseMatches++;
+            }
+        });
+        
+        // Third pass: Handle unmatched SKUs
+        Object.entries(brightpearlInventory).forEach(([sku, data]) => {
+            if (!processedSkus.has(sku)) {
+                brightpearlOnlySkus.push({
+                    sku: sku,
+                    quantity: data.quantity,
+                    productName: data.productName
+                });
+            }
+        });
+        
+        Object.entries(infoplusInventory).forEach(([sku, data]) => {
+            if (!processedSkus.has(sku)) {
+                infoplusOnlySkus.push({
+                    sku: sku,
+                    quantity: data.quantity,
+                    productName: data.productName
                 });
             }
         });
 
-        // Sort by absolute difference (largest discrepancies first)
+        console.log(`📊 Matching results:`);
+        console.log(`   - Strict matches: ${strictMatches} (e.g., "2XL-407-SINGLE" ↔ "2xl-407-SINGLE")`);
+        console.log(`   - Loose matches: ${looseMatches} (e.g., "QB-TOWELS" ↔ "QBTowels")`);
+        console.log(`   - Total exact matches: ${exactMatches.length}`);
+        console.log(`   - Discrepancies: ${discrepancies.length}`);
+        console.log(`   - Brightpearl only: ${brightpearlOnlySkus.length}`);
+        console.log(`   - Infoplus only: ${infoplusOnlySkus.length}`);
+        
+        // Sort discrepancies by absolute difference (largest first)
         discrepancies.sort((a, b) => Math.abs(b.difference) - Math.abs(a.difference));
+        
+        // Show some examples of successful matches
+        if (exactMatches.length > 0) {
+            console.log('✅ Sample exact matches:');
+            exactMatches.slice(0, 3).forEach(match => {
+                const matchTypeLabel = match.matchType === 'strict' ? '(case diff)' : '(separator diff)';
+                console.log(`   - "${match.brightpearlSku}" ↔ "${match.infoplusSku}" ${matchTypeLabel} (${match.quantity} units)`);
+            });
+        }
+        
+        // Show some examples of discrepancies with original SKUs
+        if (discrepancies.length > 0) {
+            console.log('⚠️ Sample discrepancies:');
+            discrepancies.slice(0, 3).forEach(disc => {
+                const matchTypeLabel = disc.matchType === 'strict' ? '(case diff)' : '(separator diff)';
+                console.log(`   - "${disc.brightpearlSku || disc.sku}" ↔ "${disc.infoplusSku || disc.sku}" ${matchTypeLabel}: BP=${disc.brightpearl_stock}, IP=${disc.infoplus_stock}, Diff=${disc.difference}`);
+            });
+        }
 
-        console.log(`✅ Found ${discrepancies.length} discrepancies out of ${allSkus.size} SKUs`);
+        const totalMatches = exactMatches.length + discrepancies.length;
+        console.log(`✅ Found ${discrepancies.length} discrepancies out of ${totalMatches} matched SKUs`);
 
-        // Save report to database
-        const reportData = {
-            date: new Date().toISOString().split('T')[0],
-            total_discrepancies: discrepancies.length,
-            discrepancies: JSON.stringify(discrepancies),
-            created_at: new Date().toISOString(),
-            brightpearl_total_items: Object.keys(brightpearlInventory).length,
-            infoplus_total_items: Object.keys(infoplusInventory).length
-        };
+        // Save report to database (FIXED - only use existing columns)
+        let reportId = null;
+        try {
+            const reportData = {
+                date: new Date().toISOString().split('T')[0],
+                total_discrepancies: discrepancies.length,
+                discrepancies: JSON.stringify(discrepancies),
+                created_at: new Date().toISOString(),
+                brightpearl_total_items: Object.keys(brightpearlInventory).length,
+                infoplus_total_items: Object.keys(infoplusInventory).length
+            };
 
-        const { data, error } = await supabase
-            .from('inventory_reports')
-            .insert([reportData])
-            .select()
-            .single();
+            const { data, error } = await supabase
+                .from('inventory_reports')
+                .insert([reportData])
+                .select()
+                .single();
 
-        if (error) throw error;
+            if (error) {
+                console.error('❌ Database save failed:', error);
+                console.log('⚠️ Continuing without saving to database...');
+            } else {
+                reportId = data.id;
+                console.log('✅ Report saved to database with ID:', reportId);
+            }
+        } catch (dbError) {
+            console.error('❌ Database save exception:', dbError);
+            console.log('⚠️ Continuing without saving to database...');
+        }
 
         // Send email if configured and there are discrepancies
         const emailRecipients = process.env.EMAIL_RECIPIENTS;
         if (emailRecipients && emailTransporter && discrepancies.length > 0) {
             try {
                 await sendInventoryReportEmail({
-                    ...reportData,
+                    date: new Date().toISOString().split('T')[0],
+                    total_discrepancies: discrepancies.length,
                     discrepancies
                 }, emailRecipients);
                 console.log('✅ Email report sent successfully');
@@ -822,14 +1278,22 @@ async function performRealInventoryComparison() {
             }
         }
 
+        // Return success response even if database save failed
         return {
+            success: true,
             totalDiscrepancies: discrepancies.length,
             discrepancies: discrepancies.slice(0, 50), // Limit response size
-            message: `Real inventory comparison completed - analyzed ${allSkus.size} SKUs`,
-            reportId: data.id,
+            exactMatches: exactMatches.length,
+            strictMatches: strictMatches,
+            looseMatches: looseMatches,
+            brightpearlOnly: brightpearlOnlySkus.length,
+            infoplusOnly: infoplusOnlySkus.length,
+            message: `Inventory comparison completed successfully! ${strictMatches} strict + ${looseMatches} loose matches found. Only ${discrepancies.length} real discrepancies need attention.`,
+            reportId: reportId,
             brightpearlItems: Object.keys(brightpearlInventory).length,
             infoplusItems: Object.keys(infoplusInventory).length,
-            totalSkusAnalyzed: allSkus.size
+            totalMatches: totalMatches,
+            timestamp: new Date().toISOString()
         };
 
     } catch (error) {
@@ -900,14 +1364,25 @@ async function sendInventoryReportEmail(reportData, recipients) {
     }
 }
 
-// REPLACE the mock run-comparison route with this real one:
 app.post('/texon-inventory-comparison/api/run-comparison', authenticateToken, async (req, res) => {
     try {
+        console.log('🔄 Starting manual inventory comparison...');
         const result = await performRealInventoryComparison();
+        
+        console.log('✅ Comparison completed successfully');
         res.json(result);
+        
     } catch (error) {
-        console.error('❌ Real comparison failed:', error);
-        res.status(500).json({ error: error.message });
+        console.error('❌ Manual comparison failed:', error);
+        
+        // Always return JSON, never let Express return HTML error pages
+        res.status(500).json({ 
+            success: false,
+            error: error.message || 'Unknown error occurred',
+            details: error.code || 'INTERNAL_ERROR',
+            timestamp: new Date().toISOString(),
+            message: 'Inventory comparison failed. Please check the server logs for details.'
+        });
     }
 });
 
@@ -990,6 +1465,206 @@ app.get('/texon-inventory-comparison/api/latest-report', authenticateToken, asyn
     }
 });
 
+// Add this new route to your server.js file (after your existing reports routes):
+
+// Excel download route for reports
+app.get('/texon-inventory-comparison/api/reports/:reportId/excel', authenticateToken, async (req, res) => {
+    try {
+        const { reportId } = req.params;
+        
+        console.log(`📊 Generating Excel report for ID: ${reportId}`);
+        
+        // Get the report from database
+        const { data: report, error } = await supabase
+            .from('inventory_reports')
+            .select('*')
+            .eq('id', reportId)
+            .single();
+
+        if (error || !report) {
+            console.error('❌ Report not found:', error);
+            return res.status(404).json({ error: 'Report not found' });
+        }
+
+        // Parse discrepancies
+        let discrepancies = [];
+        try {
+            if (report.discrepancies) {
+                if (typeof report.discrepancies === 'string') {
+                    discrepancies = JSON.parse(report.discrepancies);
+                } else if (Array.isArray(report.discrepancies)) {
+                    discrepancies = report.discrepancies;
+                }
+            }
+        } catch (parseError) {
+            console.error('❌ Error parsing discrepancies:', parseError);
+            return res.status(400).json({ error: 'Invalid report data' });
+        }
+
+        // Create Excel workbook
+        const workbook = new ExcelJS.Workbook();
+        
+        // Report Summary Sheet
+        const summarySheet = workbook.addWorksheet('Report Summary');
+        
+        // Add summary header
+        summarySheet.addRow(['Texon Inventory Comparison Report']);
+        summarySheet.addRow([]);
+        summarySheet.addRow(['Report Date:', report.date]);
+        summarySheet.addRow(['Generated:', new Date(report.created_at).toLocaleString()]);
+        summarySheet.addRow(['Total Discrepancies:', report.total_discrepancies]);
+        summarySheet.addRow(['Brightpearl Items:', report.brightpearl_total_items]);
+        summarySheet.addRow(['Infoplus Items:', report.infoplus_total_items]);
+        summarySheet.addRow([]);
+        
+        // Style the summary header
+        summarySheet.getCell('A1').font = { bold: true, size: 16 };
+        summarySheet.getCell('A1').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE6F3FF' } };
+        
+        // Make summary labels bold
+        for (let row = 3; row <= 7; row++) {
+            summarySheet.getCell(`A${row}`).font = { bold: true };
+        }
+
+        // Discrepancies Sheet
+        const discrepanciesSheet = workbook.addWorksheet('Discrepancies');
+        
+        // Add discrepancies header
+        const headerRow = discrepanciesSheet.addRow([
+            'SKU',
+            'Product Name',
+            'Brightpearl Stock',
+            'Infoplus Stock', 
+            'Difference',
+            'Percentage Difference',
+            'Brand',
+            'Match Type'
+        ]);
+        
+        // Style header row
+        headerRow.eachCell((cell) => {
+            cell.font = { bold: true };
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9EDF7' } };
+            cell.border = {
+                top: { style: 'thin' },
+                left: { style: 'thin' },
+                bottom: { style: 'thin' },
+                right: { style: 'thin' }
+            };
+        });
+
+        // Add discrepancy data
+        discrepancies.forEach((item, index) => {
+            const row = discrepanciesSheet.addRow([
+                item.sku || '',
+                item.productName || 'N/A',
+                item.brightpearl_stock || 0,
+                item.infoplus_stock || 0,
+                item.difference || 0,
+                item.percentage_diff ? `${item.percentage_diff}%` : 'N/A',
+                item.brand || 'Unknown',
+                item.matchType || item.match_type || 'N/A'
+            ]);
+            
+            // Color code the difference column
+            const diffCell = row.getCell(5);
+            if (item.difference > 0) {
+                diffCell.font = { color: { argb: 'FF006400' } }; // Green for positive
+            } else if (item.difference < 0) {
+                diffCell.font = { color: { argb: 'FFDC143C' } }; // Red for negative
+            }
+            
+            // Add borders
+            row.eachCell((cell) => {
+                cell.border = {
+                    top: { style: 'thin' },
+                    left: { style: 'thin' },
+                    bottom: { style: 'thin' },
+                    right: { style: 'thin' }
+                };
+            });
+            
+            // Alternate row colors
+            if (index % 2 === 0) {
+                row.eachCell((cell) => {
+                    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF8F9FA' } };
+                });
+            }
+        });
+
+        // Auto-fit columns
+        discrepanciesSheet.columns = [
+            { width: 20 }, // SKU
+            { width: 40 }, // Product Name
+            { width: 15 }, // Brightpearl Stock
+            { width: 15 }, // Infoplus Stock
+            { width: 12 }, // Difference
+            { width: 18 }, // Percentage Difference
+            { width: 15 }, // Brand
+            { width: 12 }  // Match Type
+        ];
+
+        summarySheet.columns = [
+            { width: 25 },
+            { width: 20 }
+        ];
+
+        // If there are no discrepancies, add a note
+        if (discrepancies.length === 0) {
+            discrepanciesSheet.addRow([]);
+            const noDiscrepanciesRow = discrepanciesSheet.addRow(['No discrepancies found - all inventory matches!']);
+            noDiscrepanciesRow.getCell(1).font = { bold: true, color: { argb: 'FF006400' } };
+        }
+
+        // Add statistics sheet if there are discrepancies
+        if (discrepancies.length > 0) {
+            const statsSheet = workbook.addWorksheet('Statistics');
+            
+            // Calculate statistics
+            const totalAbsDiff = discrepancies.reduce((sum, item) => sum + Math.abs(item.difference || 0), 0);
+            const avgAbsDiff = totalAbsDiff / discrepancies.length;
+            const maxDiff = Math.max(...discrepancies.map(item => Math.abs(item.difference || 0)));
+            const positiveDiscrepancies = discrepancies.filter(item => (item.difference || 0) > 0).length;
+            const negativeDiscrepancies = discrepancies.filter(item => (item.difference || 0) < 0).length;
+            
+            statsSheet.addRow(['Inventory Discrepancy Statistics']);
+            statsSheet.addRow([]);
+            statsSheet.addRow(['Total Discrepancies:', discrepancies.length]);
+            statsSheet.addRow(['Positive Discrepancies (Brightpearl > Infoplus):', positiveDiscrepancies]);
+            statsSheet.addRow(['Negative Discrepancies (Infoplus > Brightpearl):', negativeDiscrepancies]);
+            statsSheet.addRow(['Total Absolute Difference:', totalAbsDiff]);
+            statsSheet.addRow(['Average Absolute Difference:', Math.round(avgAbsDiff * 100) / 100]);
+            statsSheet.addRow(['Largest Absolute Difference:', maxDiff]);
+            
+            // Style statistics
+            statsSheet.getCell('A1').font = { bold: true, size: 14 };
+            for (let row = 3; row <= 8; row++) {
+                statsSheet.getCell(`A${row}`).font = { bold: true };
+            }
+            
+            statsSheet.columns = [{ width: 35 }, { width: 20 }];
+        }
+
+        // Set response headers for Excel download
+        const filename = `inventory-report-${report.date}-${reportId}.xlsx`;
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+        // Write workbook to response
+        await workbook.xlsx.write(res);
+        res.end();
+        
+        console.log(`✅ Excel report generated successfully: ${filename}`);
+
+    } catch (error) {
+        console.error('❌ Error generating Excel report:', error);
+        res.status(500).json({ 
+            error: 'Failed to generate Excel report',
+            details: error.message 
+        });
+    }
+});
+
 // Settings routes
 app.get('/texon-inventory-comparison/api/settings', authenticateToken, async (req, res) => {
     try {
@@ -1039,6 +1714,25 @@ app.get('/texon-inventory-comparison/api/test', authenticateToken, async (req, r
         timestamp: new Date().toISOString(),
         server_status: 'OK'
     });
+});
+
+// Add this route to your server.js file (replace the existing one)
+app.get('/texon-inventory-comparison/api/debug-brightpearl-inventory', async (req, res) => {
+    try {
+        console.log('🧪 Starting Brightpearl inventory debug...');
+        const debugResult = await brightpearlAPI.debugCurrentInventoryStructure();
+        res.json({ 
+            success: true, 
+            message: 'Debug complete - check server logs for detailed output',
+            debugResult 
+        });
+    } catch (error) {
+        console.error('❌ Debug route failed:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: error.message 
+        });
+    }
 });
 
 // Serve React app - IMPORTANT: This must be the last route
