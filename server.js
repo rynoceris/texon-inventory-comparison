@@ -1183,6 +1183,29 @@ async function performRealInventoryComparison() {
         console.log(`📊 Brightpearl items: ${Object.keys(brightpearlInventory).length}`);
         console.log(`📊 Infoplus items: ${Object.keys(infoplusInventory).length}`);
         
+        // Get ignored SKUs from settings
+        let ignoredSkus = [];
+        try {
+            const { data: ignoredSkusSetting, error: ignoredError } = await supabaseService
+                .from('app_settings')
+                .select('value')
+                .eq('key', 'ignored_skus')
+                .single();
+            
+            if (!ignoredError && ignoredSkusSetting && ignoredSkusSetting.value) {
+                ignoredSkus = ignoredSkusSetting.value
+                    .split('\n')
+                    .map(sku => sku.trim())
+                    .filter(sku => sku.length > 0);
+                
+                if (ignoredSkus.length > 0) {
+                    console.log(`🔍 Ignored SKUs loaded: ${ignoredSkus.join(', ')}`);
+                }
+            }
+        } catch (error) {
+            console.error('⚠️ Error fetching ignored SKUs:', error);
+        }
+        
         // Create normalized SKU maps for both systems
         console.log('🔄 Normalizing SKUs for better matching...');
         
@@ -1210,6 +1233,12 @@ async function performRealInventoryComparison() {
             
             const displaySku = brightpearlItem?.originalSku || infoplusItem?.originalSku || normalizedSku;
             const productName = brightpearlItem?.productName || infoplusItem?.productName || 'Unknown Product';
+            
+            // Skip if this SKU is in the ignored list
+            if (ignoredSkus.includes(displaySku)) {
+                console.log(`🚫 Skipping ignored SKU: ${displaySku}`);
+                return;
+            }
             
             // Mark both original SKUs as processed
             if (brightpearlItem) processedSkus.add(brightpearlItem.originalSku);

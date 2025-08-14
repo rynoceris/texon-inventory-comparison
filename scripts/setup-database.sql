@@ -72,7 +72,8 @@ INSERT INTO public.app_settings (key, value, created_by) VALUES
     ('auto_cleanup_enabled', 'false', 'system'),
     ('api_timeout_seconds', '60', 'system'),
     ('max_concurrent_requests', '5', 'system'),
-    ('debug_logging', 'false', 'system')
+    ('debug_logging', 'false', 'system'),
+    ('ignored_skus', '', 'system')
 ON CONFLICT (key) DO NOTHING;
 
 -- Create indexes for performance

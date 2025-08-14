@@ -383,7 +383,10 @@ function Settings({ token, user }) {
     // System Settings
     api_timeout_seconds: 30,
     max_concurrent_requests: 5,
-    debug_logging: false
+    debug_logging: false,
+    
+    // SKU Filter Settings
+    ignored_skus: ''
   };
 
   useEffect(() => {
@@ -783,6 +786,37 @@ function Settings({ token, user }) {
             <p className="setting-description">
               Log detailed debugging information (may impact performance)
             </p>
+          </div>
+        </div>
+      </div>
+
+      {/* SKU Filter Settings */}
+      <div className="settings-section">
+        <h3>🔍 SKU Filter Settings</h3>
+        <div className="setting-group">
+          <div className="setting-item">
+            <label className="setting-label">Ignored SKUs</label>
+            <textarea
+              value={settings.ignored_skus || ''}
+              onChange={(e) => updateSetting('ignored_skus', e.target.value)}
+              rows="4"
+              className="setting-input"
+              placeholder="Enter SKUs to ignore during comparisons, one per line&#10;Example:&#10;LCLIPS&#10;MISC&#10;TEST170228"
+            />
+            <p className="setting-description">
+              SKUs listed here will be excluded from all inventory comparisons (both manual and scheduled).
+              Enter one SKU per line. Changes take effect on the next comparison.
+            </p>
+            {settings.ignored_skus && settings.ignored_skus.trim() && (
+              <div className="ignored-skus-preview">
+                <strong>Currently ignored SKUs:</strong>
+                <ul style={{margin: '5px 0', paddingLeft: '20px', fontSize: '0.9em'}}>
+                  {settings.ignored_skus.trim().split('\n').map((sku, index) => (
+                    <li key={index} style={{color: '#6c757d'}}>{sku.trim()}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
         </div>
       </div>
