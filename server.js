@@ -21,6 +21,79 @@ app.use('/texon-inventory-comparison/static', express.static(path.join(__dirname
 
 console.log('🚀 Starting Texon Inventory Comparison Server...');
 
+// Global debug logging flag (will be updated from database)
+let debugLoggingEnabled = false;
+
+// Global API performance settings (will be updated from database)
+let apiTimeoutSeconds = 60;
+let maxConcurrentRequests = 5;
+
+// Debug logging helper function
+function debugLog(...args) {
+    if (debugLoggingEnabled) {
+        console.log('🐛 [DEBUG]', ...args);
+    }
+}
+
+// Function to update performance settings from database
+async function updatePerformanceSettings() {
+    try {
+        const { data: settings, error } = await supabaseService
+            .from('app_settings')
+            .select('key, value')
+            .in('key', ['debug_logging', 'api_timeout_seconds', 'max_concurrent_requests']);
+
+        if (!error && settings) {
+            settings.forEach(setting => {
+                switch (setting.key) {
+                    case 'debug_logging':
+                        const newDebugValue = setting.value === 'true';
+                        if (debugLoggingEnabled !== newDebugValue) {
+                            debugLoggingEnabled = newDebugValue;
+                            console.log(`🐛 Debug logging ${debugLoggingEnabled ? 'enabled' : 'disabled'}`);
+                        }
+                        break;
+                    case 'api_timeout_seconds':
+                        const newTimeout = parseInt(setting.value) || 60;
+                        if (apiTimeoutSeconds !== newTimeout) {
+                            apiTimeoutSeconds = newTimeout;
+                            console.log(`⏱️ API timeout updated to ${apiTimeoutSeconds} seconds`);
+                        }
+                        break;
+                    case 'max_concurrent_requests':
+                        const newMaxConcurrent = parseInt(setting.value) || 5;
+                        if (maxConcurrentRequests !== newMaxConcurrent) {
+                            maxConcurrentRequests = newMaxConcurrent;
+                            console.log(`🚦 Max concurrent requests updated to ${maxConcurrentRequests}`);
+                        }
+                        break;
+                }
+            });
+        }
+    } catch (error) {
+        // Silently ignore errors - these settings are not critical
+        debugLog('Error updating performance settings:', error);
+    }
+}
+
+// Alias for backward compatibility
+async function updateDebugLoggingSetting() {
+    await updatePerformanceSettings();
+}
+
+// Helper function for fetch with timeout
+async function fetchWithTimeout(url, options = {}) {
+    const timeoutMs = (apiTimeoutSeconds || 60) * 1000;
+    debugLog(`Making request with ${timeoutMs}ms timeout:`, url);
+    
+    return Promise.race([
+        fetch(url, options),
+        new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(`Request timeout after ${apiTimeoutSeconds}s`)), timeoutMs)
+        )
+    ]);
+}
+
 // Environment variables validation
 const requiredEnvVars = ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'JWT_SECRET'];
 const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
@@ -37,13 +110,25 @@ const supabase = createClient(
     process.env.SUPABASE_ANON_KEY
 );
 
-console.log('✅ Supabase client initialized');
+// Supabase service client (bypasses RLS)
+const supabaseService = createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_ANON_KEY,
+    {
+        auth: {
+            autoRefreshToken: false,
+            persistSession: false
+        }
+    }
+);
+
+console.log('✅ Supabase clients initialized');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
 // Helper functions
 async function getUserByUsername(username) {
-    const { data, error } = await supabase
+    const { data, error } = await supabaseService
         .from('app_users')
         .select('*')
         .eq('username', username)
@@ -118,7 +203,7 @@ app.post('/texon-inventory-comparison/api/auth/login', async (req, res) => {
         }
 
         // Enhanced user selection to include new fields
-        const { data: user, error } = await supabase
+        const { data: user, error } = await supabaseService
             .from('app_users')
             .select('*')
             .eq('username', username)
@@ -139,7 +224,7 @@ app.post('/texon-inventory-comparison/api/auth/login', async (req, res) => {
         }
 
         // Update last login
-        await supabase
+        await supabaseService
             .from('app_users')
             .update({ last_login: new Date().toISOString() })
             .eq('id', user.id);
@@ -226,8 +311,12 @@ class BrightpearlAPI {
             try {
                 const url = `${this.baseUrl}/${this.account}/${endpoint}`;
                 console.log(`🔄 Brightpearl API Request (attempt ${attempt}): ${url}`);
+                debugLog('Brightpearl request headers:', {
+                    'brightpearl-app-ref': this.appRef,
+                    'brightpearl-staff-token': this.token?.substring(0, 8) + '***'
+                });
                 
-                const response = await fetch(url, {
+                const response = await fetchWithTimeout(url, {
                     headers: {
                         'brightpearl-app-ref': this.appRef,
                         'brightpearl-staff-token': this.token,  // Correct header name
@@ -706,8 +795,11 @@ class InfoplusAPI {
         try {
             const url = `${this.baseUrl}/${this.version}/${endpoint}`;
             console.log(`🔄 Infoplus API Request: ${url}`);
+            debugLog('Infoplus request headers:', {
+                'API-Key': this.apiKey?.substring(0, 8) + '***'
+            });
             
-            const response = await fetch(url, {
+            const response = await fetchWithTimeout(url, {
                 headers: {
                     'API-Key': this.apiKey,
                     'Content-Type': 'application/json',
@@ -1259,7 +1351,7 @@ async function performRealInventoryComparison() {
                 infoplus_total_items: Object.keys(infoplusInventory).length
             };
 
-            const { data, error } = await supabase
+            const { data, error } = await supabaseService
                 .from('inventory_reports')
                 .insert([reportData])
                 .select()
@@ -1277,19 +1369,64 @@ async function performRealInventoryComparison() {
             console.log('⚠️ Continuing without saving to database...');
         }
 
-        // Send email if configured and there are discrepancies
-        const emailRecipients = process.env.EMAIL_RECIPIENTS;
-        if (emailRecipients && emailTransporter && discrepancies.length > 0) {
+        // Send email if configured (fetch email settings from database)
+        if (emailTransporter) {
             try {
-                await sendInventoryReportEmail({
-                    date: new Date().toISOString().split('T')[0],
-                    total_discrepancies: discrepancies.length,
-                    discrepancies
-                }, emailRecipients);
-                console.log('✅ Email report sent successfully');
+                // Get email settings from database
+                const { data: emailSettings, error: emailError } = await supabaseService
+                    .from('app_settings')
+                    .select('key, value')
+                    .in('key', ['email_recipients', 'email_notifications', 'email_on_zero_discrepancies', 'max_discrepancies_in_email']);
+
+                if (emailError) {
+                    console.error('❌ Error fetching email settings:', emailError);
+                    return;
+                }
+
+                // Convert to object
+                const settings = {};
+                emailSettings.forEach(setting => {
+                    if (setting.value === 'true') settings[setting.key] = true;
+                    else if (setting.value === 'false') settings[setting.key] = false;
+                    else if (!isNaN(setting.value) && setting.value !== '') settings[setting.key] = parseInt(setting.value);
+                    else settings[setting.key] = setting.value;
+                });
+
+                const emailRecipients = settings.email_recipients;
+                const emailNotifications = settings.email_notifications !== false; // Default to true
+                const emailOnZeroDiscrepancies = settings.email_on_zero_discrepancies === true;
+                const maxDiscrepanciesInEmail = settings.max_discrepancies_in_email || 25;
+
+                // Check if we should send email
+                const shouldSendEmail = emailNotifications && emailRecipients && emailRecipients.trim() && 
+                                      (discrepancies.length > 0 || emailOnZeroDiscrepancies);
+                
+                if (shouldSendEmail) {
+                    await sendInventoryReportEmail({
+                        date: new Date().toISOString().split('T')[0],
+                        totalDiscrepancies: discrepancies.length,
+                        discrepancies: discrepancies.slice(0, maxDiscrepanciesInEmail), // Limit discrepancies in email
+                        brightpearlTotalItems: Object.keys(brightpearlInventory).length,
+                        infoplusTotalItems: Object.keys(infoplusInventory).length
+                    }, emailRecipients);
+                    
+                    const discrepancyMsg = discrepancies.length > maxDiscrepanciesInEmail ? 
+                        `${maxDiscrepanciesInEmail} of ${discrepancies.length} discrepancies` : 
+                        `${discrepancies.length} discrepancies`;
+                    
+                    console.log(`✅ Email report sent successfully to: ${emailRecipients} (${discrepancyMsg})`);
+                } else if (!emailNotifications) {
+                    console.log('📧 Email notifications disabled in settings');
+                } else if (!emailRecipients) {
+                    console.log('⚠️ No email recipients configured in settings');
+                } else if (discrepancies.length === 0 && !emailOnZeroDiscrepancies) {
+                    console.log('📧 Skipping email - no discrepancies and zero-discrepancy emails disabled');
+                }
             } catch (emailError) {
                 console.error('❌ Failed to send email report:', emailError);
             }
+        } else {
+            console.log('⚠️ Email service not configured');
         }
 
         // Return success response even if database save failed
@@ -1316,7 +1453,160 @@ async function performRealInventoryComparison() {
     }
 }
 
-// Email function (simplified version)
+// Helper function to generate Excel report buffer
+async function generateExcelReportBuffer(reportData) {
+    const { discrepancies, totalDiscrepancies, date, brightpearlTotalItems, infoplusTotalItems } = reportData;
+    
+    // Create Excel workbook
+    const workbook = new ExcelJS.Workbook();
+    
+    // Report Summary Sheet
+    const summarySheet = workbook.addWorksheet('Report Summary');
+    
+    // Add summary header
+    summarySheet.addRow(['Texon Inventory Comparison Report']);
+    summarySheet.addRow([]);
+    summarySheet.addRow(['Report Date:', date]);
+    summarySheet.addRow(['Generated:', new Date().toLocaleString()]);
+    summarySheet.addRow(['Total Discrepancies:', totalDiscrepancies]);
+    summarySheet.addRow(['Brightpearl Items:', brightpearlTotalItems || 'N/A']);
+    summarySheet.addRow(['Infoplus Items:', infoplusTotalItems || 'N/A']);
+    summarySheet.addRow([]);
+    
+    // Style the summary header
+    summarySheet.getCell('A1').font = { bold: true, size: 16 };
+    summarySheet.getCell('A1').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE6F3FF' } };
+    
+    // Make summary labels bold
+    for (let row = 3; row <= 7; row++) {
+        summarySheet.getCell(`A${row}`).font = { bold: true };
+    }
+    
+    // Discrepancies Sheet
+    const discrepanciesSheet = workbook.addWorksheet('Discrepancies');
+    
+    // Add discrepancies header
+    const headerRow = discrepanciesSheet.addRow([
+        'SKU',
+        'Product Name',
+        'Brightpearl Stock',
+        'Infoplus Stock', 
+        'Difference',
+        'Percentage Difference',
+        'Brand',
+        'Match Type'
+    ]);
+    
+    // Style header row
+    headerRow.eachCell((cell) => {
+        cell.font = { bold: true };
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9EDF7' } };
+        cell.border = {
+            top: { style: 'thin' },
+            left: { style: 'thin' },
+            bottom: { style: 'thin' },
+            right: { style: 'thin' }
+        };
+    });
+    
+    // Add discrepancy data
+    discrepancies.forEach((item, index) => {
+        const row = discrepanciesSheet.addRow([
+            item.sku || '',
+            item.productName || 'N/A',
+            item.brightpearl_stock || 0,
+            item.infoplus_stock || 0,
+            item.difference || 0,
+            item.percentage_diff ? `${item.percentage_diff}%` : 'N/A',
+            item.brand || 'Unknown',
+            item.matchType || item.match_type || 'N/A'
+        ]);
+        
+        // Color code the difference column
+        const diffCell = row.getCell(5);
+        if (item.difference > 0) {
+            diffCell.font = { color: { argb: 'FF006400' } }; // Green for positive
+        } else if (item.difference < 0) {
+            diffCell.font = { color: { argb: 'FFDC143C' } }; // Red for negative
+        }
+        
+        // Add borders
+        row.eachCell((cell) => {
+            cell.border = {
+                top: { style: 'thin' },
+                left: { style: 'thin' },
+                bottom: { style: 'thin' },
+                right: { style: 'thin' }
+            };
+        });
+        
+        // Alternate row colors
+        if (index % 2 === 0) {
+            row.eachCell((cell) => {
+                cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF8F9FA' } };
+            });
+        }
+    });
+    
+    // Auto-fit columns
+    discrepanciesSheet.columns = [
+        { width: 20 }, // SKU
+        { width: 40 }, // Product Name
+        { width: 15 }, // Brightpearl Stock
+        { width: 15 }, // Infoplus Stock
+        { width: 12 }, // Difference
+        { width: 18 }, // Percentage Difference
+        { width: 15 }, // Brand
+        { width: 12 }  // Match Type
+    ];
+    
+    summarySheet.columns = [
+        { width: 25 },
+        { width: 20 }
+    ];
+    
+    // If there are no discrepancies, add a note
+    if (discrepancies.length === 0) {
+        discrepanciesSheet.addRow([]);
+        const noDiscrepanciesRow = discrepanciesSheet.addRow(['No discrepancies found - all inventory matches!']);
+        noDiscrepanciesRow.getCell(1).font = { bold: true, color: { argb: 'FF006400' } };
+    }
+
+    // Add statistics sheet if there are discrepancies
+    if (discrepancies.length > 0) {
+        const statsSheet = workbook.addWorksheet('Statistics');
+        
+        // Calculate statistics
+        const totalAbsDiff = discrepancies.reduce((sum, item) => sum + Math.abs(item.difference || 0), 0);
+        const avgAbsDiff = totalAbsDiff / discrepancies.length;
+        const maxDiff = Math.max(...discrepancies.map(item => Math.abs(item.difference || 0)));
+        const positiveDiscrepancies = discrepancies.filter(item => (item.difference || 0) > 0).length;
+        const negativeDiscrepancies = discrepancies.filter(item => (item.difference || 0) < 0).length;
+        
+        statsSheet.addRow(['Inventory Discrepancy Statistics']);
+        statsSheet.addRow([]);
+        statsSheet.addRow(['Total Discrepancies:', discrepancies.length]);
+        statsSheet.addRow(['Positive Discrepancies (Brightpearl > Infoplus):', positiveDiscrepancies]);
+        statsSheet.addRow(['Negative Discrepancies (Infoplus > Brightpearl):', negativeDiscrepancies]);
+        statsSheet.addRow(['Total Absolute Difference:', totalAbsDiff]);
+        statsSheet.addRow(['Average Absolute Difference:', Math.round(avgAbsDiff * 100) / 100]);
+        statsSheet.addRow(['Largest Absolute Difference:', maxDiff]);
+        
+        // Style statistics
+        statsSheet.getCell('A1').font = { bold: true, size: 14 };
+        for (let row = 3; row <= 8; row++) {
+            statsSheet.getCell(`A${row}`).font = { bold: true };
+        }
+        
+        statsSheet.columns = [{ width: 35 }, { width: 20 }];
+    }
+    
+    // Generate buffer
+    const buffer = await workbook.xlsx.writeBuffer();
+    return buffer;
+}
+
+// Email function with Excel attachment
 async function sendInventoryReportEmail(reportData, recipients) {
     if (!emailTransporter) {
         throw new Error('Email service not configured');
@@ -1360,14 +1650,26 @@ async function sendInventoryReportEmail(reportData, recipients) {
             </table>
             ` : '<p style="color: green;"><strong>✅ No discrepancies found!</strong></p>'}
             
+            <p><strong>📎 Complete report attached as Excel file</strong></p>
             <p><em>Automated report from Texon Inventory Comparison system.</em></p>
         `;
+
+        // Generate Excel attachment
+        const excelBuffer = await generateExcelReportBuffer(reportData);
+        const filename = `inventory-report-${date}.xlsx`;
 
         const mailOptions = {
             from: process.env.SMTP_FROM || process.env.SMTP_USER,
             to: recipients,
             subject: subject,
-            html: htmlContent
+            html: htmlContent,
+            attachments: [
+                {
+                    filename: filename,
+                    content: excelBuffer,
+                    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                }
+            ]
         };
 
         const result = await emailTransporter.sendMail(mailOptions);
@@ -1460,6 +1762,107 @@ function isValidEmail(email) {
 // Cron job management
 let currentCronJob = null;
 
+// Report cleanup function
+async function cleanupOldReports() {
+    try {
+        console.log('🧹 Starting report cleanup process...');
+        
+        // Get cleanup settings from database
+        const { data: cleanupSettings, error } = await supabaseService
+            .from('app_settings')
+            .select('key, value')
+            .in('key', ['auto_cleanup_enabled', 'report_retention_days']);
+
+        if (error) {
+            console.error('❌ Error fetching cleanup settings:', error);
+            return;
+        }
+
+        // Convert to object
+        const settings = {};
+        cleanupSettings.forEach(setting => {
+            if (setting.value === 'true') settings[setting.key] = true;
+            else if (setting.value === 'false') settings[setting.key] = false;
+            else if (!isNaN(setting.value) && setting.value !== '') settings[setting.key] = parseInt(setting.value);
+            else settings[setting.key] = setting.value;
+        });
+
+        const autoCleanupEnabled = settings.auto_cleanup_enabled === true;
+        const retentionDays = settings.report_retention_days || 30;
+
+        if (!autoCleanupEnabled) {
+            console.log('🧹 Auto cleanup disabled');
+            return;
+        }
+
+        // Calculate cutoff date
+        const cutoffDate = new Date();
+        cutoffDate.setDate(cutoffDate.getDate() - retentionDays);
+        const cutoffISOString = cutoffDate.toISOString();
+
+        console.log(`🧹 Cleaning reports older than ${retentionDays} days (before ${cutoffDate.toDateString()})`);
+
+        // First, count how many reports we have total
+        const { count: totalReports, error: countError } = await supabaseService
+            .from('inventory_reports')
+            .select('*', { count: 'exact', head: true });
+
+        if (countError) {
+            console.error('❌ Error counting reports:', countError);
+            return;
+        }
+
+        // Get reports to delete (but keep at least the most recent one)
+        const { data: reportsToDelete, error: fetchError } = await supabaseService
+            .from('inventory_reports')
+            .select('id, date, created_at')
+            .lt('created_at', cutoffISOString)
+            .order('created_at', { ascending: false });
+
+        if (fetchError) {
+            console.error('❌ Error fetching old reports:', fetchError);
+            return;
+        }
+
+        // Only delete if we have more than 1 report total (keep at least the most recent)
+        if (totalReports <= 1) {
+            console.log('🧹 Skipping cleanup - keeping at least one report');
+            return;
+        }
+
+        // Keep at least 1 report, so only delete if we would have reports remaining
+        const reportsToKeep = totalReports - reportsToDelete.length;
+        if (reportsToKeep < 1) {
+            // Only delete some of the old reports to keep at least 1
+            const deleteCount = reportsToDelete.length - 1;
+            reportsToDelete.splice(deleteCount);
+            console.log(`🧹 Modified cleanup to keep at least 1 report (deleting ${deleteCount} instead of ${reportsToDelete.length})`);
+        }
+
+        if (reportsToDelete.length === 0) {
+            console.log('🧹 No old reports to cleanup');
+            return;
+        }
+
+        // Delete old reports
+        const reportIds = reportsToDelete.map(r => r.id);
+        const { error: deleteError } = await supabaseService
+            .from('inventory_reports')
+            .delete()
+            .in('id', reportIds);
+
+        if (deleteError) {
+            console.error('❌ Error deleting old reports:', deleteError);
+            return;
+        }
+
+        console.log(`✅ Cleanup completed: deleted ${reportsToDelete.length} old reports`);
+        
+    } catch (error) {
+        console.error('❌ Error during report cleanup:', error);
+    }
+}
+
 function updateCronJob(enabled, schedule, timezone) {
     try {
         // Stop existing cron job
@@ -1476,6 +1879,9 @@ function updateCronJob(enabled, schedule, timezone) {
                 try {
                     await performRealInventoryComparison();
                     console.log('✅ Scheduled comparison completed successfully');
+                    
+                    // Run cleanup after successful comparison
+                    await cleanupOldReports();
                 } catch (error) {
                     console.error('❌ Scheduled comparison failed:', error);
                 }
@@ -1496,7 +1902,7 @@ function updateCronJob(enabled, schedule, timezone) {
 // Initialize cron job on server start
 async function initializeCronJob() {
     try {
-        const { data: settings, error } = await supabase
+        const { data: settings, error } = await supabaseService
             .from('app_settings')
             .select('*')
             .in('key', ['cron_enabled', 'cron_schedule', 'cron_timezone']);
@@ -1519,8 +1925,14 @@ async function initializeCronJob() {
     }
 }
 
-// Call this after your database connection is established
-initializeCronJob();
+// Initialize performance settings and cron job after database connection
+async function initializeAppFeatures() {
+    await updatePerformanceSettings();
+    initializeCronJob();
+}
+
+// Call this after supabase client is ready
+initializeAppFeatures();
 
 app.post('/texon-inventory-comparison/api/run-comparison', authenticateToken, async (req, res) => {
     try {
@@ -1577,7 +1989,7 @@ app.get('/texon-inventory-comparison/api/test', authenticateToken, async (req, r
 // Reports routes
 app.get('/texon-inventory-comparison/api/reports', authenticateToken, async (req, res) => {
     try {
-        const { data, error } = await supabase
+        const { data, error } = await supabaseService
             .from('inventory_reports')
             .select('*')
             .order('created_at', { ascending: false })
@@ -1600,7 +2012,7 @@ app.get('/texon-inventory-comparison/api/reports', authenticateToken, async (req
 // Get latest report
 app.get('/texon-inventory-comparison/api/latest-report', authenticateToken, async (req, res) => {
     try {
-        const { data, error } = await supabase
+        const { data, error } = await supabaseService
             .from('inventory_reports')
             .select('*')
             .order('created_at', { ascending: false })
@@ -1633,7 +2045,7 @@ app.get('/texon-inventory-comparison/api/reports/:reportId/excel', authenticateT
         console.log(`📊 Generating Excel report for ID: ${reportId}`);
         
         // Get the report from database
-        const { data: report, error } = await supabase
+        const { data: report, error } = await supabaseService
             .from('inventory_reports')
             .select('*')
             .eq('id', reportId)
@@ -1839,7 +2251,7 @@ app.delete('/texon-inventory-comparison/api/reports/:reportId', authenticateToke
         console.log(`🗑️ Admin ${req.user.username} deleting report ID: ${reportId}`);
 
         // Check if report exists
-        const { data: report, error: fetchError } = await supabase
+        const { data: report, error: fetchError } = await supabaseService
             .from('inventory_reports')
             .select('id, date, created_at, total_discrepancies')
             .eq('id', reportId)
@@ -1856,7 +2268,7 @@ app.delete('/texon-inventory-comparison/api/reports/:reportId', authenticateToke
         }
 
         // Delete the report
-        const { error: deleteError } = await supabase
+        const { error: deleteError } = await supabaseService
             .from('inventory_reports')
             .delete()
             .eq('id', reportId);
@@ -1894,7 +2306,7 @@ app.get('/texon-inventory-comparison/api/settings', authenticateToken, async (re
     }
 
     try {
-        const { data, error } = await supabase
+        const { data, error } = await supabaseService
             .from('app_settings')
             .select('*');
 
@@ -1961,7 +2373,7 @@ app.put('/texon-inventory-comparison/api/settings', authenticateToken, async (re
             const stringValue = String(value);
 
             // Check if setting exists
-            const { data: existingSetting, error: checkError } = await supabase
+            const { data: existingSetting, error: checkError } = await supabaseService
                 .from('app_settings')
                 .select('key')
                 .eq('key', key)
@@ -1969,7 +2381,7 @@ app.put('/texon-inventory-comparison/api/settings', authenticateToken, async (re
 
             if (existingSetting) {
                 // Update existing setting
-                const { error: updateError } = await supabase
+                const { error: updateError } = await supabaseService
                     .from('app_settings')
                     .update({
                         value: stringValue,
@@ -1981,7 +2393,7 @@ app.put('/texon-inventory-comparison/api/settings', authenticateToken, async (re
                 if (updateError) throw updateError;
             } else {
                 // Create new setting
-                const { error: insertError } = await supabase
+                const { error: insertError } = await supabaseService
                     .from('app_settings')
                     .insert([{
                         key: key,
@@ -1999,6 +2411,13 @@ app.put('/texon-inventory-comparison/api/settings', authenticateToken, async (re
         // Update cron job if schedule changed
         if (newSettings.cron_enabled !== undefined || newSettings.cron_schedule) {
             updateCronJob(newSettings.cron_enabled, newSettings.cron_schedule, newSettings.cron_timezone);
+        }
+
+        // Update performance settings if changed
+        if (newSettings.debug_logging !== undefined || 
+            newSettings.api_timeout_seconds !== undefined || 
+            newSettings.max_concurrent_requests !== undefined) {
+            await updatePerformanceSettings();
         }
 
         console.log(`✅ Settings updated successfully by ${req.user.username}`);
@@ -2108,7 +2527,7 @@ app.get('/texon-inventory-comparison/api/users', authenticateToken, async (req, 
     }
     
     try {
-        const { data, error } = await supabase
+        const { data, error } = await supabaseService
             .from('app_users')
             .select('id, username, email, first_name, last_name, role, created_at, last_login, is_active')
             .order('created_at', { ascending: false });
@@ -2146,7 +2565,7 @@ app.post('/texon-inventory-comparison/api/users', authenticateToken, async (req,
         }
 
         // Check if username already exists
-        const { data: existingUser, error: checkError } = await supabase
+        const { data: existingUser, error: checkError } = await supabaseService
             .from('app_users')
             .select('id')
             .eq('username', username)
@@ -2160,7 +2579,7 @@ app.post('/texon-inventory-comparison/api/users', authenticateToken, async (req,
         }
 
         // Check if email already exists
-        const { data: existingEmail, error: emailCheckError } = await supabase
+        const { data: existingEmail, error: emailCheckError } = await supabaseService
             .from('app_users')
             .select('id')
             .eq('email', email)
@@ -2178,7 +2597,7 @@ app.post('/texon-inventory-comparison/api/users', authenticateToken, async (req,
         const hashedPassword = await bcrypt.hash(password, saltRounds);
 
         // Create user
-        const { data: newUser, error: insertError } = await supabase
+        const { data: newUser, error: insertError } = await supabaseService
             .from('app_users')
             .insert([{
                 username: username.trim(),
@@ -2242,7 +2661,7 @@ app.put('/texon-inventory-comparison/api/users/:userId', authenticateToken, asyn
         }
 
         // Check if user exists
-        const { data: existingUser, error: checkError } = await supabase
+        const { data: existingUser, error: checkError } = await supabaseService
             .from('app_users')
             .select('id, username, email')
             .eq('id', userId)
@@ -2257,7 +2676,7 @@ app.put('/texon-inventory-comparison/api/users/:userId', authenticateToken, asyn
 
         // Check if email is being changed and if new email already exists
         if (email !== existingUser.email) {
-            const { data: emailExists, error: emailCheckError } = await supabase
+            const { data: emailExists, error: emailCheckError } = await supabaseService
                 .from('app_users')
                 .select('id')
                 .eq('email', email)
@@ -2294,7 +2713,7 @@ app.put('/texon-inventory-comparison/api/users/:userId', authenticateToken, asyn
         }
 
         // Update user
-        const { data: updatedUser, error: updateError } = await supabase
+        const { data: updatedUser, error: updateError } = await supabaseService
             .from('app_users')
             .update(updateData)
             .eq('id', userId)
@@ -2338,7 +2757,7 @@ app.delete('/texon-inventory-comparison/api/users/:userId', authenticateToken, a
         }
 
         // Check if user exists
-        const { data: existingUser, error: checkError } = await supabase
+        const { data: existingUser, error: checkError } = await supabaseService
             .from('app_users')
             .select('id, username')
             .eq('id', userId)
@@ -2352,7 +2771,7 @@ app.delete('/texon-inventory-comparison/api/users/:userId', authenticateToken, a
         }
 
         // Delete user
-        const { error: deleteError } = await supabase
+        const { error: deleteError } = await supabaseService
             .from('app_users')
             .delete()
             .eq('id', userId);

@@ -6,7 +6,13 @@ require('dotenv').config();
 async function createAdminUser() {
   const supabase = createClient(
 	process.env.SUPABASE_URL,
-	process.env.SUPABASE_ANON_KEY
+	process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_ANON_KEY,
+	{
+	  auth: {
+		autoRefreshToken: false,
+		persistSession: false
+	  }
+	}
   );
 
   const username = process.argv[2] || 'admin';
@@ -22,7 +28,10 @@ async function createAdminUser() {
 		username,
 		password_hash: hashedPassword,
 		email,
+		first_name: 'Admin',
+		last_name: 'User',
 		role: 'admin',
+		is_active: true,
 		created_at: new Date().toISOString()
 	  }]);
 
